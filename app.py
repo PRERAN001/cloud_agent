@@ -4,6 +4,7 @@ import json
 import os
 import random
 import re
+import shlex
 import shutil
 import subprocess
 import threading
@@ -133,6 +134,96 @@ def detect_project_type(repo_path: Path) -> str:
     return "unknown"
 
 
+def detect_framework_details(repo_path: Path) -> dict[str, Any]:
+    """Agent 4: Detect exact framework and subtype (React/Vite/Next.js, Express/Fastify/NestJS, Flask/FastAPI/Django/ML)."""
+    base_type = detect_project_type(repo_path)
+    result: dict[str, Any] = {
+        "base_type": base_type,
+        "framework": "unknown",
+        "subtype": None,
+        "is_fullstack": False,
+        "build_tool": None,
+    }
+
+    if base_type == "node":
+        pkg_json_path = repo_path / "package.json"
+        if pkg_json_path.exists():
+            try:
+                data = json.loads(pkg_json_path.read_text(encoding="utf-8"))
+                all_deps: dict[str, str] = {
+                    **data.get("dependencies", {}),
+                    **data.get("devDependencies", {}),
+                }
+                if "react" in all_deps:
+                    result["framework"] = "react"
+                    if "next" in all_deps:
+                        result["subtype"] = "nextjs"
+                        result["build_tool"] = "next"
+                    elif "vite" in all_deps or any("@vitejs" in k for k in all_deps):
+                        result["subtype"] = "vite"
+                        result["build_tool"] = "vite"
+                    else:
+                        result["subtype"] = "cra"
+                        result["build_tool"] = "react-scripts"
+                elif "@nestjs/core" in all_deps:
+                    result["framework"] = "nestjs"
+                elif "fastify" in all_deps:
+                    result["framework"] = "fastify"
+                elif "express" in all_deps:
+                    result["framework"] = "express"
+                else:
+                    result["framework"] = "node"
+
+                if not result["build_tool"]:
+                    scripts = data.get("scripts", {})
+                    build_script = scripts.get("build", "") if isinstance(scripts, dict) else ""
+                    if "webpack" in build_script:
+                        result["build_tool"] = "webpack"
+                    elif "vite" in build_script:
+                        result["build_tool"] = "vite"
+            except Exception:
+                pass
+
+    elif base_type == "python":
+        req_text = ""
+        req_file = repo_path / "requirements.txt"
+        if req_file.exists():
+            try:
+                req_text = req_file.read_text(encoding="utf-8", errors="ignore").lower()
+            except OSError:
+                pass
+
+        import_text = ""
+        for src_file in list(repo_path.glob("*.py"))[:10]:
+            try:
+                import_text += src_file.read_text(encoding="utf-8", errors="ignore").lower()
+            except OSError:
+                pass
+
+        combined = req_text + import_text
+        if "fastapi" in combined:
+            result["framework"] = "fastapi"
+            result["build_tool"] = "uvicorn"
+        elif "django" in combined:
+            result["framework"] = "django"
+            result["build_tool"] = "django"
+        elif "flask" in combined:
+            result["framework"] = "flask"
+            result["build_tool"] = "flask"
+        elif is_streamlit_project(repo_path):
+            result["framework"] = "streamlit"
+            result["build_tool"] = "streamlit"
+        elif any(ml in combined for ml in ["tensorflow", "torch", "scikit-learn", "sklearn", "keras", "pandas", "numpy"]):
+            result["framework"] = "ml"
+        else:
+            result["framework"] = "python"
+
+        if (repo_path / "package.json").exists():
+            result["is_fullstack"] = True
+
+    return result
+
+
 def is_streamlit_project(repo_path: Path) -> bool:
     requirements = repo_path / "requirements.txt"
     if requirements.exists():
@@ -199,6 +290,231 @@ def write_env_file(repo_path: Path, env_values: dict[str, str], required_keys: l
 
     env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return env_path
+
+
+def write_env_example(repo_path: Path, env_keys: list[str]) -> Path:
+    """Agent 3: Generate .env.example documenting required environment variables."""
+    env_example_path = repo_path / ".env.example"
+    lines = ["# Copy this file to .env and fill in values", ""]
+    if env_keys:
+        for key in env_keys:
+            lines.append(f"{key}=")
+    else:
+        lines.append("# No environment variables detected")
+    env_example_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return env_example_path
+
+
+def ensure_gitignore_has_env(repo_path: Path) -> bool:
+    """Agent 3: Ensure .env is listed in .gitignore. Returns True if the file was modified."""
+    gitignore_path = repo_path / ".gitignore"
+    if gitignore_path.exists():
+        try:
+            content = gitignore_path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            content = ""
+        lines = content.splitlines()
+        if ".env" in lines or "*.env" in lines:
+            return False
+        with open(gitignore_path, "a", encoding="utf-8") as f:
+            f.write("\n.env\n")
+        return True
+    gitignore_path.write_text(".env\n", encoding="utf-8")
+    return True
+
+
+def validate_dependencies(repo_path: Path, project_type: str) -> dict[str, Any]:
+    """Agent 2: Validate dependency files and report missing or problematic configurations."""
+    found_files: list[str] = []
+    missing_files: list[str] = []
+    issues: list[dict[str, str]] = []
+
+    if project_type == "python":
+        dep_files = ["requirements.txt", "pyproject.toml", "Pipfile"]
+        for f in dep_files:
+            if (repo_path / f).exists():
+                found_files.append(f)
+        if not found_files:
+            missing_files.append("requirements.txt")
+            issues.append({
+                "severity": "high",
+                "message": "No Python dependency file found. Create requirements.txt, pyproject.toml, or Pipfile.",
+            })
+        if not (repo_path / "requirements.lock").exists() and "requirements.txt" in found_files:
+            issues.append({
+                "severity": "low",
+                "message": "Consider using pip-compile or Poetry to generate a lock file for reproducible builds.",
+            })
+
+    elif project_type == "node":
+        if not (repo_path / "package.json").exists():
+            missing_files.append("package.json")
+            issues.append({"severity": "high", "message": "package.json not found."})
+        else:
+            found_files.append("package.json")
+            lock_files = ["package-lock.json", "yarn.lock", "pnpm-lock.yaml"]
+            found_locks = [f for f in lock_files if (repo_path / f).exists()]
+            if found_locks:
+                found_files.extend(found_locks)
+            else:
+                missing_files.extend(lock_files)
+                issues.append({
+                    "severity": "medium",
+                    "message": "No lock file found (package-lock.json/yarn.lock/pnpm-lock.yaml). Commit a lock file for reproducible installs.",
+                })
+
+    passed = not any(i["severity"] == "high" for i in issues)
+    return {
+        "found_files": found_files,
+        "missing_files": missing_files,
+        "issues": issues,
+        "passed": passed,
+    }
+
+
+def validate_build(repo_path: Path, project_type: str, framework: str) -> dict[str, Any]:
+    """Agent 5: Validate the project build and generate run/build commands."""
+    steps: list[dict[str, Any]] = []
+    build_scripts: dict[str, str] = {}
+
+    if project_type == "python":
+        req_file = repo_path / "requirements.txt"
+        if req_file.exists():
+            try:
+                req_lines = req_file.read_text(encoding="utf-8").splitlines()
+                valid = [ln for ln in req_lines if ln.strip() and not ln.strip().startswith("#")]
+                steps.append({"step": "requirements.txt", "ok": True, "details": f"{len(valid)} packages listed"})
+            except OSError as exc:
+                steps.append({"step": "requirements.txt", "ok": False, "details": str(exc)})
+        else:
+            steps.append({"step": "requirements.txt", "ok": False, "details": "File not found"})
+
+        syntax = run_command("python -m compileall -q .", repo_path, timeout=120)
+        steps.append({
+            "step": "python syntax check",
+            "ok": syntax.ok,
+            "details": (syntax.stderr or syntax.stdout or "ok")[:500],
+        })
+
+        entry = find_python_entrypoint(repo_path)
+        if framework == "fastapi":
+            build_scripts["start"] = f"uvicorn {entry.replace('.py', '')}:app --host 0.0.0.0 --port 5000"
+        elif framework == "flask":
+            build_scripts["start"] = "flask run --host=0.0.0.0 --port=5000"
+        elif framework == "django":
+            build_scripts["start"] = "python manage.py runserver 0.0.0.0:5000"
+        elif framework == "streamlit":
+            build_scripts["start"] = f"streamlit run {entry} --server.port 5000 --server.address 0.0.0.0"
+        else:
+            build_scripts["start"] = f"python {entry}"
+
+    elif project_type == "node":
+        pkg_json = repo_path / "package.json"
+        if pkg_json.exists():
+            try:
+                data = json.loads(pkg_json.read_text(encoding="utf-8"))
+                scripts = data.get("scripts", {}) if isinstance(data.get("scripts"), dict) else {}
+                if "build" in scripts:
+                    build_scripts["build"] = scripts["build"]
+                    steps.append({"step": "build script", "ok": True, "details": scripts["build"]})
+                else:
+                    steps.append({"step": "build script", "ok": False, "details": "No 'build' script in package.json"})
+                if "start" in scripts:
+                    build_scripts["start"] = scripts["start"]
+                    steps.append({"step": "start script", "ok": True, "details": scripts["start"]})
+                else:
+                    steps.append({"step": "start script", "ok": False, "details": "No 'start' script in package.json"})
+                steps.append({"step": "package.json valid", "ok": True, "details": "Parsed successfully"})
+            except Exception as exc:
+                steps.append({"step": "package.json parse", "ok": False, "details": str(exc)})
+        else:
+            steps.append({"step": "package.json", "ok": False, "details": "File not found"})
+
+    success = len(steps) > 0 and all(s["ok"] for s in steps)
+    return {"steps": steps, "success": success, "build_scripts": build_scripts}
+
+
+def generate_readme_content(
+    repo_path: Path,
+    project_type: str,
+    framework: str,
+    env_keys: list[str],
+    build_info: dict[str, Any],
+) -> str:
+    """Agent 9: Generate a professional README.md for the analyzed repository."""
+    repo_name = repo_path.name.replace("-", " ").replace("_", " ").title()
+
+    lang_map = {"python": "Python", "node": "Node.js"}
+    framework_map = {
+        "flask": "Flask",
+        "fastapi": "FastAPI",
+        "django": "Django",
+        "express": "Express",
+        "fastify": "Fastify",
+        "nestjs": "NestJS",
+        "react": "React",
+        "streamlit": "Streamlit",
+        "ml": "Python (Machine Learning)",
+    }
+    lang = lang_map.get(project_type, project_type.title())
+    fw = framework_map.get(framework, framework.title())
+
+    install_cmd = "pip install -r requirements.txt" if project_type == "python" else "npm install"
+
+    start_cmd = build_info.get("build_scripts", {}).get("start", "")
+    if not start_cmd:
+        start_cmd = f"python {find_python_entrypoint(repo_path)}" if project_type == "python" else "npm start"
+
+    build_cmd = build_info.get("build_scripts", {}).get("build", "")
+    build_section = f"\n```bash\n# Build\n{build_cmd}\n```\n" if build_cmd else ""
+
+    env_section = ""
+    if env_keys:
+        rows = "\n".join(f"| `{k}` | *(required)* |" for k in env_keys)
+        env_section = (
+            "\n## Environment Setup\n\n"
+            "Copy `.env.example` to `.env`:\n\n"
+            "```bash\ncp .env.example .env\n```\n\n"
+            "Required environment variables:\n\n"
+            "| Variable | Description |\n"
+            "|----------|-------------|\n"
+            f"{rows}\n"
+        )
+
+    slug = repo_path.name
+    docker_section = (
+        "## Docker Usage\n\n"
+        "```bash\n"
+        f"# Build the image\ndocker build -t {slug} .\n\n"
+        f"# Run the container\ndocker run -p 5000:5000 {slug}\n"
+        "```\n"
+    )
+
+    api_section = ""
+    if project_type in ("python", "node") and framework not in ("react", "ml", "streamlit"):
+        api_section = (
+            "\n## API Usage\n\n"
+            "After starting the server the API is available at `http://localhost:5000`.\n"
+            "Refer to the source code for available endpoints.\n"
+        )
+
+    return (
+        f"# {repo_name}\n\n"
+        f"## Overview\n\nA {fw} application built with {lang}.\n\n"
+        f"## Tech Stack\n\n- **Language**: {lang}\n- **Framework**: {fw}\n\n"
+        f"## Installation\n\n```bash\n{install_cmd}\n```\n\n"
+        f"## Running the Application\n\n```bash\n{start_cmd}\n```\n"
+        f"{build_section}"
+        f"{env_section}"
+        f"{docker_section}"
+        f"{api_section}"
+        "\n## Contributing\n\n"
+        "1. Fork the repository\n"
+        "2. Create a feature branch (`git checkout -b feature/improvement`)\n"
+        "3. Commit your changes\n"
+        "4. Push and open a Pull Request\n"
+        "\n## License\n\nSee [LICENSE](LICENSE) for details.\n"
+    )
 
 
 def find_python_entrypoint(repo_path: Path) -> str:
@@ -286,34 +602,72 @@ def generate_dockerfile(repo_path: Path, project_type: str) -> tuple[Path, bool,
         entry = find_python_entrypoint(repo_path)
         if streamlit_project:
             entry = find_streamlit_entrypoint(repo_path)
-            docker_content = f"""FROM python:3.11-slim
-    WORKDIR /app
-    COPY requirements.txt /app/requirements.txt
-    RUN pip install --no-cache-dir -r /app/requirements.txt
-    COPY . /app
-    EXPOSE 5000
-    CMD [\"streamlit\", \"run\", \"{entry}\", \"--server.port\", \"5000\", \"--server.address\", \"0.0.0.0\"]
-    """
+            docker_content = (
+                "FROM python:3.11-slim\n"
+                "WORKDIR /app\n"
+                "COPY requirements.txt /app/requirements.txt\n"
+                "RUN pip install --no-cache-dir -r /app/requirements.txt\n"
+                "COPY . /app\n"
+                "EXPOSE 5000\n"
+                f'CMD ["streamlit", "run", "{entry}", "--server.port", "5000", "--server.address", "0.0.0.0"]\n'
+            )
         else:
-            docker_content = f"""FROM python:3.11-slim
-WORKDIR /app
-COPY requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir -r /app/requirements.txt
-COPY . /app
-EXPOSE 5000
-CMD [\"python\", \"{entry}\"]
-"""
+            docker_content = (
+                "FROM python:3.11-slim\n"
+                "WORKDIR /app\n"
+                "COPY requirements.txt /app/requirements.txt\n"
+                "RUN pip install --no-cache-dir -r /app/requirements.txt\n"
+                "COPY . /app\n"
+                "EXPOSE 5000\n"
+                f'CMD ["python", "{entry}"]\n'
+            )
         container_port = 5000
     elif project_type == "node":
-        docker_content = """FROM node:20-alpine
-WORKDIR /app
-COPY package*.json /app/
-RUN npm install
-COPY . /app
-EXPOSE 3000
-CMD ["npm", "start"]
-"""
-        container_port = 3000
+        framework_info = detect_framework_details(repo_path)
+        fw = framework_info.get("framework", "node")
+        subtype = framework_info.get("subtype") or ""
+        if fw == "react":
+            if subtype == "nextjs":
+                docker_content = (
+                    "FROM node:20-alpine\n"
+                    "WORKDIR /app\n"
+                    "COPY package*.json /app/\n"
+                    "RUN npm install\n"
+                    "COPY . /app\n"
+                    "RUN npm run build\n"
+                    "EXPOSE 3000\n"
+                    'CMD ["npm", "start"]\n'
+                )
+                container_port = 3000
+            else:
+                # Vite or CRA — multi-stage build with Nginx
+                dist_dir = "dist" if subtype == "vite" else "build"
+                docker_content = (
+                    "# Build stage\n"
+                    "FROM node:20-alpine AS builder\n"
+                    "WORKDIR /app\n"
+                    "COPY package*.json /app/\n"
+                    "RUN npm install\n"
+                    "COPY . /app\n"
+                    "RUN npm run build\n\n"
+                    "# Production stage\n"
+                    "FROM nginx:alpine\n"
+                    f"COPY --from=builder /app/{dist_dir} /usr/share/nginx/html\n"
+                    "EXPOSE 80\n"
+                    'CMD ["nginx", "-g", "daemon off;"]\n'
+                )
+                container_port = 80
+        else:
+            docker_content = (
+                "FROM node:20-alpine\n"
+                "WORKDIR /app\n"
+                "COPY package*.json /app/\n"
+                "RUN npm install\n"
+                "COPY . /app\n"
+                "EXPOSE 3000\n"
+                'CMD ["npm", "start"]\n'
+            )
+            container_port = 3000
     else:
         raise ValueError("Cannot generate Dockerfile for unknown project type")
 
@@ -326,7 +680,10 @@ def clone_or_update_repo(repo_url: str) -> tuple[Path, str, str]:
     repo_path = BASE_DIR / repo_name
 
     if not repo_path.exists():
-        result = run_command(f"git clone --depth 1 {repo_url} {repo_name}", BASE_DIR)
+        result = run_command(
+            f"git clone --depth 1 {shlex.quote(repo_url)} {shlex.quote(repo_name)}",
+            BASE_DIR,
+        )
         if not result.ok:
             raise RuntimeError(f"Clone failed: {result.stderr or result.stdout}")
         return repo_path, repo_name, result.stdout or "Repository cloned"
@@ -374,15 +731,24 @@ def run_project_agents(repo_path: Path) -> dict[str, Any]:
             "has_cmd": "CMD" in content.upper(),
         }
 
+    def framework_agent() -> dict[str, Any]:
+        return {"framework_details": detect_framework_details(repo_path)}
+
+    def dependency_agent() -> dict[str, Any]:
+        project_type = detect_project_type(repo_path)
+        return {"dependency_validation": validate_dependencies(repo_path, project_type)}
+
     jobs = {
         "config_agent": cfg_agent,
         "project_type_agent": type_agent,
         "env_agent": env_agent,
         "docker_agent": docker_agent,
+        "framework_agent": framework_agent,
+        "dependency_agent": dependency_agent,
     }
 
     output: dict[str, Any] = {}
-    with ThreadPoolExecutor(max_workers=4) as executor:
+    with ThreadPoolExecutor(max_workers=6) as executor:
         future_map = {executor.submit(func): name for name, func in jobs.items()}
         for future in as_completed(future_map):
             name = future_map[future]
@@ -391,6 +757,7 @@ def run_project_agents(repo_path: Path) -> dict[str, Any]:
             except Exception as exc:  # pragma: no cover
                 output[name] = {"error": str(exc)}
     return output
+
 def get_repo_head_sha(repo_path: Path) -> str:
     head = run_command("git rev-parse HEAD", repo_path, timeout=60)
     if head.ok and head.stdout:
@@ -836,11 +1203,19 @@ def orchestrate() -> Any:
         ), 200
 
     env_file = write_env_file(repo_path, env_values, required_env_keys)
+    write_env_example(repo_path, required_env_keys)
+    ensure_gitignore_has_env(repo_path)
+
+    framework_details = agents.get("framework_agent", {}).get("framework_details", {})
+    framework = framework_details.get("framework", "unknown")
 
     try:
         dockerfile_path, docker_changed, container_port, docker_note = generate_dockerfile(repo_path, project_type)
     except Exception as exc:
         return jsonify({"error": f"Dockerfile step failed: {exc}"}), 500
+
+    # Agent 5: Build validation
+    build_validation = validate_build(repo_path, project_type, framework)
 
     image_name = f"{docker_safe_name(repo_name)}:latest"
 
@@ -877,9 +1252,11 @@ def orchestrate() -> Any:
             "repo": repo_name,
             "repo_path": str(repo_path),
             "project_type": project_type,
+            "framework_details": framework_details,
             "agents": agents,
             "clone_logs": clone_logs,
             "env_file": str(env_file),
+            "build_validation": build_validation,
             "dockerfile": str(dockerfile_path),
             "docker_changed": docker_changed,
             "docker_note": docker_note,
@@ -931,6 +1308,153 @@ def deploy_platform() -> Any:
 @app.route("/health", methods=["GET"])
 def health() -> Any:
     return jsonify({"status": "ok", "sessions": len(SESSIONS)})
+
+
+@app.route("/analyze", methods=["POST"])
+def analyze() -> Any:
+    """Agent 1: Repository Clone & Structure Analysis."""
+    data = request.get_json(silent=True) or {}
+    repo_url = (data.get("repo_url") or "").strip()
+
+    if not repo_url:
+        return jsonify({"error": "repo_url is required"}), 400
+
+    ok, reason = validate_github_repo_url(repo_url)
+    if not ok:
+        return jsonify({"error": reason}), 400
+
+    try:
+        repo_path, repo_name, clone_logs = clone_or_update_repo(repo_url)
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+    project_type = detect_project_type(repo_path)
+    framework_details = detect_framework_details(repo_path)
+    env_keys = detect_env_keys(repo_path)
+    dep_validation = validate_dependencies(repo_path, project_type)
+
+    exclude_dirs = {".git", "node_modules", "venv", "__pycache__", "dist", "build"}
+    file_counts: dict[str, int] = {}
+    for f in repo_path.rglob("*"):
+        if not f.is_file():
+            continue
+        rel = f.relative_to(repo_path)
+        if any(part in exclude_dirs for part in rel.parts):
+            continue
+        ext = f.suffix.lower() or "(no ext)"
+        file_counts[ext] = file_counts.get(ext, 0) + 1
+
+    config_files = {
+        "requirements.txt": (repo_path / "requirements.txt").exists(),
+        "package.json": (repo_path / "package.json").exists(),
+        "Dockerfile": (repo_path / "Dockerfile").exists(),
+        "README.md": (repo_path / "README.md").exists(),
+        ".env.example": (repo_path / ".env.example").exists(),
+        ".gitignore": (repo_path / ".gitignore").exists(),
+        "docker-compose.yml": (repo_path / "docker-compose.yml").exists(),
+    }
+    primary_dep_file = "requirements.txt" if project_type == "python" else "package.json"
+    missing_critical = [name for name, present in config_files.items() if not present and name in {primary_dep_file, "Dockerfile", "README.md"}]
+
+    return jsonify({
+        "status": "analyzed",
+        "repo": repo_name,
+        "clone_logs": clone_logs,
+        "project_type": project_type,
+        "framework_details": framework_details,
+        "required_env_keys": env_keys,
+        "config_files": config_files,
+        "missing_critical_files": missing_critical,
+        "dependency_validation": dep_validation,
+        "file_counts": dict(sorted(file_counts.items(), key=lambda x: -x[1])[:15]),
+    })
+
+
+@app.route("/generate-readme", methods=["POST"])
+def generate_readme_endpoint() -> Any:
+    """Agent 9: Generate a professional README.md for the repository."""
+    data = request.get_json(silent=True) or {}
+    repo_url = (data.get("repo_url") or "").strip()
+    write_to_file = bool(data.get("write_to_file", False))
+
+    if not repo_url:
+        return jsonify({"error": "repo_url is required"}), 400
+
+    ok, reason = validate_github_repo_url(repo_url)
+    if not ok:
+        return jsonify({"error": reason}), 400
+
+    try:
+        repo_path, repo_name, clone_logs = clone_or_update_repo(repo_url)
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+    project_type = detect_project_type(repo_path)
+    framework_details = detect_framework_details(repo_path)
+    env_keys = detect_env_keys(repo_path)
+    framework = framework_details.get("framework", "unknown")
+    build_info = validate_build(repo_path, project_type, framework)
+    readme_content = generate_readme_content(repo_path, project_type, framework, env_keys, build_info)
+
+    result: dict[str, Any] = {
+        "status": "generated",
+        "repo": repo_name,
+        "readme": readme_content,
+    }
+
+    if write_to_file:
+        readme_path = repo_path / "README.md"
+        existed = readme_path.exists()
+        readme_path.write_text(readme_content, encoding="utf-8")
+        result["written_to"] = str(readme_path)
+        result["overwritten"] = existed
+
+    return jsonify(result)
+
+
+@app.route("/improvement-report", methods=["POST"])
+def improvement_report() -> Any:
+    """Agent 10: Generate a comprehensive repository improvement report."""
+    data = request.get_json(silent=True) or {}
+    repo_url = (data.get("repo_url") or "").strip()
+
+    if not repo_url:
+        return jsonify({"error": "repo_url is required"}), 400
+
+    ok, reason = validate_github_repo_url(repo_url)
+    if not ok:
+        return jsonify({"error": reason}), 400
+
+    try:
+        repo_path, repo_name, clone_logs = clone_or_update_repo(repo_url)
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+    project_type = detect_project_type(repo_path)
+    framework_details = detect_framework_details(repo_path)
+    framework = framework_details.get("framework", "unknown")
+    env_keys = detect_env_keys(repo_path)
+    dep_validation = validate_dependencies(repo_path, project_type)
+    build_validation = validate_build(repo_path, project_type, framework)
+    review = run_repo_review_checks(repo_path, project_type, quick_mode=True)
+
+    findings = review.get("findings") or []
+    return jsonify({
+        "status": "report-generated",
+        "repo": repo_name,
+        "project_type": project_type,
+        "framework_details": framework_details,
+        "dependency_validation": dep_validation,
+        "build_validation": build_validation,
+        "code_review": review,
+        "required_env_keys": env_keys,
+        "recommendations": {
+            "critical": [f for f in findings if f["severity"] == "high"],
+            "moderate": [f for f in findings if f["severity"] == "medium"],
+            "minor": [f for f in findings if f["severity"] == "low"],
+        },
+        "overall_score": review.get("score", 0),
+    })
 
 
 if __name__ == "__main__":
