@@ -340,7 +340,7 @@ def validate_dependencies(repo_path: Path, project_type: str) -> dict[str, Any]:
                 "severity": "high",
                 "message": "No Python dependency file found. Create requirements.txt, pyproject.toml, or Pipfile.",
             })
-        if not (repo_path / "requirements.lock").exists() and "requirements.txt" in found_files:
+        if not (repo_path / "requirements.lock").exists() and not (repo_path / "poetry.lock").exists() and "requirements.txt" in found_files:
             issues.append({
                 "severity": "low",
                 "message": "Consider using pip-compile or Poetry to generate a lock file for reproducible builds.",
@@ -397,8 +397,9 @@ def validate_build(repo_path: Path, project_type: str, framework: str) -> dict[s
         })
 
         entry = find_python_entrypoint(repo_path)
+        module = entry.replace(".py", "").replace("/", ".")
         if framework == "fastapi":
-            build_scripts["start"] = f"uvicorn {entry.replace('.py', '')}:app --host 0.0.0.0 --port 5000"
+            build_scripts["start"] = f"uvicorn {module}:app --host 0.0.0.0 --port 5000"
         elif framework == "flask":
             build_scripts["start"] = "flask run --host=0.0.0.0 --port=5000"
         elif framework == "django":
@@ -757,6 +758,7 @@ def run_project_agents(repo_path: Path) -> dict[str, Any]:
             except Exception as exc:  # pragma: no cover
                 output[name] = {"error": str(exc)}
     return output
+
 
 def get_repo_head_sha(repo_path: Path) -> str:
     head = run_command("git rev-parse HEAD", repo_path, timeout=60)
