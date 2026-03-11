@@ -1,0 +1,460 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Cloud Agent Orchestrator</title>
+  <style>
+    :root {
+      --bg: #ffffff;
+      --panel: #ffffff;
+      --text: #000000;
+      --muted: #666666;
+      --border: #000000;
+      --accent-bg: #000000;
+      --accent-text: #ffffff;
+      --hover: #f0f0f0;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      padding: 40px 24px;
+      line-height: 1.5;
+    }
+
+    .container {
+      max-width: 1000px;
+      margin: 0 auto;
+      display: grid;
+      gap: 24px;
+    }
+
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      padding: 24px;
+    }
+
+    h1, h2, h3 { 
+        margin: 0 0 16px; 
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+    }
+    h1 { font-size: 1.4rem; border-bottom: 2px solid var(--border); padding-bottom: 12px; }
+    h2 { font-size: 1.1rem; }
+    h3 { font-size: 0.9rem; font-weight: bold; color: var(--text); }
+
+    .grid {
+      display: grid;
+      gap: 20px;
+      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    }
+
+    label {
+      display: block;
+      margin-bottom: 8px;
+      font-weight: 600;
+      font-size: 0.85rem;
+    }
+
+    input[type="text"],
+    textarea,
+    select {
+      width: 100%;
+      background: var(--bg);
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 0;
+      padding: 12px;
+      outline: none;
+      font-family: inherit;
+    }
+
+    input[type="text"]:focus, select:focus {
+        background: var(--hover);
+    }
+
+    textarea { min-height: 100px; resize: vertical; }
+
+    .row {
+      display: flex;
+      gap: 16px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+
+    .btn {
+      background: var(--accent-bg);
+      color: var(--accent-text);
+      border: 1px solid var(--border);
+      padding: 12px 24px;
+      cursor: pointer;
+      font-weight: 700;
+      text-transform: uppercase;
+      font-size: 0.8rem;
+      transition: all 0.2s ease;
+    }
+
+    .btn:hover:not(:disabled) {
+        background: var(--bg);
+        color: var(--text);
+    }
+
+    .btn.secondary { background: var(--bg); color: var(--text); }
+    .btn.secondary:hover { background: var(--hover); }
+
+    .btn:disabled { opacity: 0.3; cursor: not-allowed; }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      padding: 6px 12px;
+      border: 1px solid var(--border);
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      margin-right: 8px;
+      margin-bottom: 8px;
+      font-weight: 600;
+    }
+
+    pre {
+      margin: 0;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      padding: 16px;
+      color: var(--text);
+      overflow: auto;
+      max-height: 400px;
+      font-size: 0.85rem;
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+      line-height: 1.5;
+    }
+
+    .muted { color: var(--muted); font-size: 0.9rem; }
+
+    .env-grid {
+      display: grid;
+      gap: 12px;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      margin-top: 16px;
+    }
+
+    .small { font-size: 0.8rem; }
+    
+    .status-msg {
+        font-weight: bold;
+        text-decoration: underline;
+    }
+
+    a { color: inherit; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="card">
+      <h1>Cloud Agent Orchestrator</h1>
+      <p class="muted">Workflow: Clone repository, execute multi-agent validation, configure environment, build Docker image, verify container, and finalize deployment.</p>
+    </div>
+
+    <div class="card">
+      <h2>1. Pipeline Configuration</h2>
+      <div class="grid">
+        <div>
+          <label for="repoUrl">GitHub Repository URL</label>
+          <input id="repoUrl" type="text" placeholder="https://github.com/user/repository.git" />
+        </div>
+        <div>
+          <label for="platform">Deployment Platform</label>
+          <select id="platform">
+            <option value="">Select Platform</option>
+            <option value="render">Render</option>
+            <option value="railway">Railway</option>
+            <option value="flyio">Fly.io</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="row" style="margin-top: 20px;">
+        <label class="pill"><input id="autoFillEnv" type="checkbox" style="margin-right:8px;"> Auto-fill Environment</label>
+        <label class="pill"><input id="forceRebuild" type="checkbox" style="margin-right:8px;"> Force Rebuild</label>
+        <label class="pill"><input id="quickReview" type="checkbox" style="margin-right:8px;" checked> Quick Review</label>
+      </div>
+
+      <div class="row" style="margin-top: 10px;">
+        <div style="max-width: 220px; width: 100%;">
+          <label for="maxFindings">Max Findings</label>
+          <input id="maxFindings" type="text" value="200" />
+        </div>
+      </div>
+
+      <div class="row" style="margin-top: 10px;">
+        <button id="runBtn" class="btn">Execute Pipeline</button>
+        <button id="reviewBtn" class="btn secondary">Run Repo Review</button>
+        <button id="rerunBtn" class="btn secondary" disabled>Re-run with parameters</button>
+      </div>
+
+      <div id="envSection" style="display:none; margin-top: 24px; border-top: 1px solid #000; padding-top: 16px;">
+        <h3>Required Environment Variables</h3>
+        <p class="small muted">Specify missing values to continue the orchestration process.</p>
+        <div id="envFields" class="env-grid"></div>
+      </div>
+    </div>
+
+    <div class="grid">
+      <div class="card">
+        <h2>2. Session Summary</h2>
+        <div id="summary" class="small muted">System idle. Ready for input.</div>
+      </div>
+      <div class="card">
+        <h2>3. Finalization</h2>
+        <div class="row" style="margin-bottom: 16px;">
+          <label class="pill"><input id="satisfied" type="checkbox" style="margin-right:8px;"> Verify Preview Completion</label>
+        </div>
+        <button id="deployBtn" class="btn" disabled style="width: 100%;">Deploy to Production</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Execution Logs</h2>
+      <pre id="output">No active logs to display.</pre>
+    </div>
+  </div>
+
+  <script>
+    const repoUrl = document.getElementById('repoUrl');
+    const autoFillEnv = document.getElementById('autoFillEnv');
+    const forceRebuild = document.getElementById('forceRebuild');
+    const quickReview = document.getElementById('quickReview');
+    const maxFindings = document.getElementById('maxFindings');
+    const platform = document.getElementById('platform');
+    const runBtn = document.getElementById('runBtn');
+    const reviewBtn = document.getElementById('reviewBtn');
+    const rerunBtn = document.getElementById('rerunBtn');
+    const deployBtn = document.getElementById('deployBtn');
+    const satisfied = document.getElementById('satisfied');
+    const summary = document.getElementById('summary');
+    const output = document.getElementById('output');
+    const envSection = document.getElementById('envSection');
+    const envFields = document.getElementById('envFields');
+
+    let lastSessionId = null;
+    let requiredEnvKeys = [];
+
+    function setOutput(data) {
+      output.textContent = typeof data === 'string' ? data : JSON.stringify(data, null, 2);
+    }
+
+    function updateSummary(payload) {
+      if (!payload || typeof payload !== 'object') {
+        summary.innerHTML = '<span class="status-msg">Error: Invalid response payload</span>';
+        return;
+      }
+
+      if (payload.status === 'ready') {
+        const preview = payload?.container?.preview_url || 'N/A';
+        const repo = payload.repo || 'N/A';
+        const pType = payload.project_type || 'N/A';
+        const dockerNote = payload.docker_note || '';
+        lastSessionId = payload.session_id || null;
+        deployBtn.disabled = !lastSessionId;
+
+        summary.innerHTML = `
+          <div><strong>Repo:</strong> ${repo}</div>
+          <div><strong>Type:</strong> ${pType}</div>
+          <div><strong>URL:</strong> <a href="${preview}" target="_blank">${preview}</a></div>
+          <div><strong>Docker:</strong> ${dockerNote}</div>
+          <div><strong>ID:</strong> ${lastSessionId}</div>
+        `;
+        return;
+      }
+
+      if (payload.status === 'env-required') {
+        summary.innerHTML = `<span class="status-msg">Action Required: Environment configuration needed.</span>`;
+        return;
+      }
+
+      if (payload.status === 'deployment-attempted') {
+        const result = payload.result || {};
+        summary.innerHTML = `<span class="status-msg">Deployment ${result.status || 'unknown'} via ${result.platform || 'N/A'}</span>`;
+        return;
+      }
+
+      if (payload.status === 'reviewed') {
+        const repo = payload.repo || 'N/A';
+        const score = payload?.review?.score ?? 'N/A';
+        const counts = payload?.review?.summary || {};
+        const durationMs = payload?.review?.meta?.duration_ms ?? 'N/A';
+        const cached = payload?.from_cache ? 'Yes' : 'No';
+        summary.innerHTML = `
+          <div><strong>Repo:</strong> ${repo}</div>
+          <div><strong>Review Score:</strong> ${score}/100</div>
+          <div><strong>Findings:</strong> High ${counts.high || 0}, Medium ${counts.medium || 0}, Low ${counts.low || 0}</div>
+          <div><strong>Scanned Files:</strong> ${counts.scanned_files || 0}</div>
+          <div><strong>Cached:</strong> ${cached}</div>
+          <div><strong>Duration:</strong> ${durationMs} ms</div>
+        `;
+        return;
+      }
+
+      if (payload.status === 'failed') {
+        summary.innerHTML = `<span class="status-msg">Pipeline Failure: ${payload.error || payload.message || 'unknown'}</span>`;
+        return;
+      }
+
+      summary.textContent = 'Process completed. Review logs for details.';
+    }
+
+    function renderEnvInputs(keys) {
+      envFields.innerHTML = '';
+      requiredEnvKeys = Array.isArray(keys) ? keys : [];
+      for (const key of requiredEnvKeys) {
+        const wrapper = document.createElement('div');
+        wrapper.innerHTML = `
+          <label for="env_${key}">${key}</label>
+          <input id="env_${key}" type="text" placeholder="Enter value" />
+        `;
+        envFields.appendChild(wrapper);
+      }
+      envSection.style.display = requiredEnvKeys.length ? 'block' : 'none';
+      rerunBtn.disabled = !requiredEnvKeys.length;
+    }
+
+    function collectEnvValues() {
+      const values = {};
+      for (const key of requiredEnvKeys) {
+        const el = document.getElementById(`env_${key}`);
+        values[key] = el ? el.value.trim() : '';
+      }
+      return values;
+    }
+
+    async function callOrchestrate(envValues = {}) {
+      const url = repoUrl.value.trim();
+      if (!url) {
+        setOutput('Error: Repository URL is required.');
+        return;
+      }
+
+      runBtn.disabled = true;
+      rerunBtn.disabled = true;
+      setOutput('Initializing pipeline: Clonal and build processes in progress...');
+
+      try {
+        const response = await fetch('/orchestrate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            repo_url: url,
+            env_values: envValues,
+            auto_fill_env: autoFillEnv.checked,
+            force_rebuild: forceRebuild.checked,
+          })
+        });
+
+        const payload = await response.json();
+        setOutput(payload);
+        updateSummary(payload);
+
+        if (payload.status === 'env-required') {
+          renderEnvInputs(payload.missing_env_keys || payload.required_env_keys || []);
+        } else {
+          envSection.style.display = 'none';
+          requiredEnvKeys = [];
+        }
+      } catch (err) {
+        const msg = err && err.message ? err.message : String(err);
+        setOutput(`Request error: ${msg}`);
+        summary.innerHTML = `<span class="status-msg">Connection error</span>`;
+      } finally {
+        runBtn.disabled = false;
+        rerunBtn.disabled = requiredEnvKeys.length === 0;
+      }
+    }
+
+    async function callDeploy() {
+      if (!lastSessionId) {
+        setOutput('Error: No active session detected.');
+        return;
+      }
+
+      if (!platform.value) {
+        setOutput('Error: Deployment platform must be selected.');
+        return;
+      }
+
+      deployBtn.disabled = true;
+      setOutput('Initiating deployment routine...');
+
+      try {
+        const response = await fetch('/deploy-platform', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            session_id: lastSessionId,
+            user_satisfied: satisfied.checked,
+            platform: platform.value,
+          })
+        });
+
+        const payload = await response.json();
+        setOutput(payload);
+        updateSummary(payload);
+      } catch (err) {
+        const msg = err && err.message ? err.message : String(err);
+        setOutput(`Deployment error: ${msg}`);
+      } finally {
+        deployBtn.disabled = false;
+      }
+    }
+
+    async function callRepoReview() {
+      const url = repoUrl.value.trim();
+      if (!url) {
+        setOutput('Error: Repository URL is required.');
+        return;
+      }
+
+      const parsedFindings = Number.parseInt((maxFindings.value || '').trim(), 10);
+      const safeMaxFindings = Number.isFinite(parsedFindings) ? parsedFindings : 200;
+
+      reviewBtn.disabled = true;
+      setOutput('Running CodeRabbit-style repository review checks...');
+
+      try {
+        const response = await fetch('/review-repo', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            repo_url: url,
+            quick_mode: quickReview.checked,
+            max_findings: safeMaxFindings,
+          })
+        });
+
+        const payload = await response.json();
+        setOutput(payload);
+        updateSummary(payload);
+      } catch (err) {
+        const msg = err && err.message ? err.message : String(err);
+        setOutput(`Review error: ${msg}`);
+      } finally {
+        reviewBtn.disabled = false;
+      }
+    }
+
+    runBtn.addEventListener('click', () => callOrchestrate({}));
+    reviewBtn.addEventListener('click', callRepoReview);
+    rerunBtn.addEventListener('click', () => callOrchestrate(collectEnvValues()));
+    deployBtn.addEventListener('click', callDeploy);
+    satisfied.addEventListener('change', () => {
+      deployBtn.disabled = !lastSessionId || !satisfied.checked;
+    });
+  </script>
+</body>
+</html>
