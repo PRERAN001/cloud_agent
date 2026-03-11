@@ -221,6 +221,23 @@
     </div>
 
     <div class="card">
+      <h2>Advanced Agent Actions</h2>
+      <p class="muted small">Run individual specialized agents on the repository URL above.</p>
+      <div class="row" style="flex-wrap: wrap; gap: 10px; margin-top: 12px;">
+        <button id="fixBtn" class="btn secondary">Fix Repository</button>
+        <button id="prBtn" class="btn secondary">Prepare PR</button>
+        <button id="archBtn" class="btn secondary">Visualize Architecture</button>
+        <button id="perfBtn" class="btn secondary">Performance Analysis</button>
+        <button id="secBtn" class="btn secondary">Security Analysis</button>
+        <button id="depBtn" class="btn secondary">Cleanup Dependencies</button>
+        <button id="testBtn" class="btn secondary">Generate Tests</button>
+        <button id="apiBtn" class="btn secondary">Discover API</button>
+        <button id="healthBtn" class="btn secondary">Health Score</button>
+        <button id="deployRecBtn" class="btn secondary">Deployment Recommendation</button>
+      </div>
+    </div>
+
+    <div class="card">
       <h2>Execution Logs</h2>
       <pre id="output">No active logs to display.</pre>
     </div>
@@ -455,6 +472,45 @@
     satisfied.addEventListener('change', () => {
       deployBtn.disabled = !lastSessionId || !satisfied.checked;
     });
+
+    async function callAgent(endpoint, extraBody = {}, label = 'Running agent...') {
+      const url = repoUrl.value.trim();
+      if (!url) { setOutput('Error: Repository URL is required.'); return; }
+      setOutput(label);
+      try {
+        const response = await fetch(endpoint, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ repo_url: url, ...extraBody }),
+        });
+        const payload = await response.json();
+        setOutput(payload);
+      } catch (err) {
+        const msg = err && err.message ? err.message : String(err);
+        setOutput(`Error calling ${endpoint}: ${msg}`);
+      }
+    }
+
+    document.getElementById('fixBtn').addEventListener('click', () =>
+      callAgent('/fix-repo', {}, 'Running Self-Fixing Repository Agent...'));
+    document.getElementById('prBtn').addEventListener('click', () =>
+      callAgent('/prepare-pr', {}, 'Preparing Pull Request metadata...'));
+    document.getElementById('archBtn').addEventListener('click', () =>
+      callAgent('/visualize-architecture', {}, 'Generating architecture diagram...'));
+    document.getElementById('perfBtn').addEventListener('click', () =>
+      callAgent('/analyze-performance', {}, 'Running Performance Analysis Agent...'));
+    document.getElementById('secBtn').addEventListener('click', () =>
+      callAgent('/analyze-security', {}, 'Running Security Analysis Agent...'));
+    document.getElementById('depBtn').addEventListener('click', () =>
+      callAgent('/cleanup-dependencies', {}, 'Scanning for unused dependencies...'));
+    document.getElementById('testBtn').addEventListener('click', () =>
+      callAgent('/generate-tests', {}, 'Generating starter test files...'));
+    document.getElementById('apiBtn').addEventListener('click', () =>
+      callAgent('/discover-api', {}, 'Discovering API endpoints...'));
+    document.getElementById('healthBtn').addEventListener('click', () =>
+      callAgent('/health-score', {}, 'Calculating repository health score...'));
+    document.getElementById('deployRecBtn').addEventListener('click', () =>
+      callAgent('/recommend-deployment', {}, 'Generating deployment recommendation...'));
   </script>
 </body>
 </html>

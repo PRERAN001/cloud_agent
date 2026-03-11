@@ -1459,5 +1459,1521 @@ def improvement_report() -> Any:
     })
 
 
+# ---------------------------------------------------------------------------
+# NEW AGENT 1 — SELF-FIXING REPOSITORY AGENT
+# ---------------------------------------------------------------------------
+
+def apply_repo_fixes(repo_path: Path, project_type: str) -> list[dict[str, str]]:
+    """Automatically apply common fixes to the repository and return a list of applied fixes."""
+    fixes: list[dict[str, str]] = []
+
+    # Fix 1: Add .env.example if missing
+    env_example = repo_path / ".env.example"
+    if not env_example.exists():
+        env_keys = detect_env_keys(repo_path)
+        write_env_example(repo_path, env_keys)
+        fixes.append({
+            "fix": "added_env_example",
+            "file": ".env.example",
+            "description": "Generated .env.example documenting detected environment variables.",
+        })
+
+    # Fix 2: Generate .gitignore if missing or ensure .env is excluded
+    gitignore = repo_path / ".gitignore"
+    if not gitignore.exists():
+        default_entries = [".env", "__pycache__/", "*.pyc", "node_modules/", "dist/", "build/", ".DS_Store"]
+        gitignore.write_text("\n".join(default_entries) + "\n", encoding="utf-8")
+        fixes.append({
+            "fix": "generated_gitignore",
+            "file": ".gitignore",
+            "description": "Generated default .gitignore with common exclusion patterns.",
+        })
+    else:
+        modified = ensure_gitignore_has_env(repo_path)
+        if modified:
+            fixes.append({
+                "fix": "updated_gitignore",
+                "file": ".gitignore",
+                "description": "Added .env to .gitignore to prevent secret leakage.",
+            })
+
+    # Fix 3: Fix / generate Dockerfile if missing or incomplete
+    dockerfile = repo_path / "Dockerfile"
+    if not dockerfile.exists() and project_type in ("python", "node"):
+        try:
+            _, changed, _, note = generate_dockerfile(repo_path, project_type)
+            if changed:
+                fixes.append({
+                    "fix": "generated_dockerfile",
+                    "file": "Dockerfile",
+                    "description": f"Generated Dockerfile for {project_type} project.",
+                })
+        except Exception:
+            pass
+    elif dockerfile.exists():
+        content = dockerfile.read_text(encoding="utf-8", errors="ignore")
+        patched = False
+        if "EXPOSE" not in content.upper():
+            port = 5000 if project_type == "python" else 3000
+            content += f"\nEXPOSE {port}\n"
+            patched = True
+        if "CMD" not in content.upper():
+            if project_type == "python":
+                entry = find_python_entrypoint(repo_path)
+                content += f'CMD ["python", "{entry}"]\n'
+            else:
+                content += 'CMD ["npm", "start"]\n'
+            patched = True
+        if patched:
+            dockerfile.write_text(content, encoding="utf-8")
+            fixes.append({
+                "fix": "repaired_dockerfile",
+                "file": "Dockerfile",
+                "description": "Added missing EXPOSE/CMD directives to existing Dockerfile.",
+            })
+
+    # Fix 4: Fix package.json scripts for Node.js projects
+    if project_type == "node":
+        pkg_json_path = repo_path / "package.json"
+        if pkg_json_path.exists():
+            try:
+                data = json.loads(pkg_json_path.read_text(encoding="utf-8"))
+                scripts = data.get("scripts", {})
+                if not isinstance(scripts, dict):
+                    scripts = {}
+                changed_pkg = False
+                if "start" not in scripts:
+                    main = data.get("main", "index.js")
+                    scripts["start"] = f"node {main}"
+                    changed_pkg = True
+                if changed_pkg:
+                    data["scripts"] = scripts
+                    pkg_json_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+                    fixes.append({
+                        "fix": "fixed_package_json_scripts",
+                        "file": "package.json",
+                        "description": "Added missing 'start' script to package.json.",
+                    })
+            except Exception:
+                pass
+
+    # Fix 5: Correct Python entrypoint — ensure app.py / main.py exists
+    if project_type == "python":
+        py_files = list(repo_path.glob("*.py"))
+        preferred = ["app.py", "main.py", "run.py", "wsgi.py"]
+        has_preferred = any((repo_path / p).exists() for p in preferred)
+        if not has_preferred and py_files:
+            # Create a minimal main.py that imports the first found module
+            first_module = py_files[0].stem
+            main_py = repo_path / "main.py"
+            if not main_py.exists():
+                main_py.write_text(
+                    f"# Auto-generated entrypoint — customize this file for your application.\n"
+                    f"import {first_module}  # noqa: F401\n",
+                    encoding="utf-8",
+                )
+                fixes.append({
+                    "fix": "created_python_entrypoint",
+                    "file": "main.py",
+                    "description": f"Created main.py entrypoint referencing {first_module}.",
+                })
+
+    # Fix 6: Add requirements.txt for Python projects if missing
+    if project_type == "python":
+        req = repo_path / "requirements.txt"
+        if not req.exists():
+            req.write_text("# Add your Python dependencies here\n", encoding="utf-8")
+            fixes.append({
+                "fix": "created_requirements_txt",
+                "file": "requirements.txt",
+                "description": "Created empty requirements.txt placeholder for Python dependencies.",
+            })
+
+    return fixes
+
+
+@app.route("/fix-repo", methods=["POST"])
+def fix_repo() -> Any:
+    """New Agent 1: Self-Fixing Repository Agent — automatically apply common project fixes."""
+    data = request.get_json(silent=True) or {}
+    repo_url = (data.get("repo_url") or "").strip()
+
+    if not repo_url:
+        return jsonify({"error": "repo_url is required"}), 400
+
+    ok, reason = validate_github_repo_url(repo_url)
+    if not ok:
+        return jsonify({"error": reason}), 400
+
+    try:
+        repo_path, repo_name, clone_logs = clone_or_update_repo(repo_url)
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+    project_type = detect_project_type(repo_path)
+    fixes = apply_repo_fixes(repo_path, project_type)
+
+    return jsonify({
+        "status": "fixed",
+        "repo": repo_name,
+        "project_type": project_type,
+        "clone_logs": clone_logs,
+        "fixes_applied": fixes,
+        "fix_count": len(fixes),
+        "message": f"Applied {len(fixes)} fix(es) to the repository.",
+    })
+
+
+# ---------------------------------------------------------------------------
+# NEW AGENT 2 — AUTOMATED PULL REQUEST AGENT
+# ---------------------------------------------------------------------------
+
+def build_pr_payload(repo_name: str, fixes: list[dict[str, str]]) -> dict[str, Any]:
+    """Build a structured PR description from applied fixes."""
+    if not fixes:
+        return {
+            "title": "chore: automated repository audit (no changes required)",
+            "description": "No fixes were necessary. The repository already meets baseline standards.",
+            "summary": [],
+            "modified_files": [],
+        }
+
+    modified_files = sorted({f["file"] for f in fixes})
+    fix_labels = {
+        "added_env_example": "Added `.env.example` for environment variable documentation",
+        "generated_gitignore": "Generated `.gitignore` with common exclusion patterns",
+        "updated_gitignore": "Updated `.gitignore` to exclude `.env` files",
+        "generated_dockerfile": "Generated `Dockerfile` for containerized deployment",
+        "repaired_dockerfile": "Repaired `Dockerfile` (added missing EXPOSE/CMD directives)",
+        "fixed_package_json_scripts": "Fixed `package.json` scripts (added missing `start` entry)",
+        "created_python_entrypoint": "Created Python entrypoint (`main.py`)",
+        "created_requirements_txt": "Created `requirements.txt` placeholder",
+    }
+
+    summary = [fix_labels.get(f["fix"], f["description"]) for f in fixes]
+    body_lines = "\n".join(f"- {s}" for s in summary)
+    files_line = "\n".join(f"- `{f}`" for f in modified_files)
+
+    description = (
+        f"## Summary\n\n"
+        f"Automated fixes applied by the Cloud Agent self-repair system.\n\n"
+        f"## Changes\n\n{body_lines}\n\n"
+        f"## Modified Files\n\n{files_line}\n\n"
+        f"## Notes\n\n"
+        f"These changes were generated automatically. Please review before merging."
+    )
+
+    return {
+        "title": f"fix: automated repository repairs for {repo_name}",
+        "description": description,
+        "summary": summary,
+        "modified_files": modified_files,
+    }
+
+
+@app.route("/prepare-pr", methods=["POST"])
+def prepare_pr() -> Any:
+    """New Agent 2: Automated Pull Request Agent — generate PR metadata after fixes."""
+    data = request.get_json(silent=True) or {}
+    repo_url = (data.get("repo_url") or "").strip()
+
+    if not repo_url:
+        return jsonify({"error": "repo_url is required"}), 400
+
+    ok, reason = validate_github_repo_url(repo_url)
+    if not ok:
+        return jsonify({"error": reason}), 400
+
+    try:
+        repo_path, repo_name, clone_logs = clone_or_update_repo(repo_url)
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+    project_type = detect_project_type(repo_path)
+    fixes = apply_repo_fixes(repo_path, project_type)
+    pr = build_pr_payload(repo_name, fixes)
+
+    diff_output = ""
+    try:
+        diff_result = run_command("git diff --stat HEAD", repo_path, timeout=30)
+        diff_output = diff_result.stdout or diff_result.stderr or ""
+    except Exception:
+        pass
+
+    return jsonify({
+        "status": "pr-ready",
+        "repo": repo_name,
+        "clone_logs": clone_logs,
+        "pr": pr,
+        "fixes_applied": fixes,
+        "git_diff_stat": diff_output,
+        "message": "Pull request metadata prepared. Review and submit via your Git provider.",
+    })
+
+
+# ---------------------------------------------------------------------------
+# NEW AGENT 3 — ARCHITECTURE VISUALIZATION AGENT
+# ---------------------------------------------------------------------------
+
+def _detect_database_tech(content_lower: str) -> list[str]:
+    """Return database technologies detected from source content."""
+    db_map = {
+        "mongodb": "MongoDB",
+        "mongoose": "MongoDB",
+        "postgres": "PostgreSQL",
+        "psycopg": "PostgreSQL",
+        "mysql": "MySQL",
+        "pymysql": "MySQL",
+        "redis": "Redis",
+        "sqlite": "SQLite",
+        "sqlalchemy": "SQLAlchemy/SQL",
+        "prisma": "Prisma ORM",
+        "sequelize": "Sequelize ORM",
+    }
+    return [label for token, label in db_map.items() if token in content_lower]
+
+
+def _detect_external_integrations(content_lower: str) -> list[str]:
+    """Return external service integrations detected from source content."""
+    ext_map = {
+        "stripe": "Stripe",
+        "twilio": "Twilio",
+        "sendgrid": "SendGrid",
+        "firebase": "Firebase",
+        "aws": "AWS",
+        "s3": "AWS S3",
+        "openai": "OpenAI API",
+        "anthropic": "Anthropic API",
+        "oauth": "OAuth",
+        "auth0": "Auth0",
+    }
+    return [label for token, label in ext_map.items() if token in content_lower]
+
+
+def generate_architecture_diagram(repo_path: Path, project_type: str, framework: str) -> dict[str, Any]:
+    """Analyse repository structure and generate a Mermaid architecture diagram."""
+    layers: dict[str, list[str]] = {
+        "frontend": [],
+        "backend": [],
+        "database": [],
+        "external": [],
+    }
+
+    exclude_dirs = {".git", "node_modules", "venv", "__pycache__", "dist", "build", ".next"}
+
+    all_content = ""
+    for f in repo_path.rglob("*"):
+        if not f.is_file():
+            continue
+        rel = f.relative_to(repo_path)
+        if any(part in exclude_dirs for part in rel.parts):
+            continue
+        if f.suffix.lower() not in {".py", ".js", ".ts", ".jsx", ".tsx", ".json", ".yaml", ".yml", ".env.example"}:
+            continue
+        try:
+            all_content += f.read_text(encoding="utf-8", errors="ignore").lower()
+        except OSError:
+            continue
+
+    # Detect frontend
+    if framework in ("react",):
+        subtype = ""
+        pkg_json = repo_path / "package.json"
+        if pkg_json.exists():
+            try:
+                pkg = json.loads(pkg_json.read_text(encoding="utf-8"))
+                deps = {**pkg.get("dependencies", {}), **pkg.get("devDependencies", {})}
+                if "next" in deps:
+                    subtype = " / Next.js"
+                elif "vite" in deps:
+                    subtype = " / Vite"
+            except Exception:
+                pass
+        layers["frontend"].append(f"React App{subtype}")
+    elif "vue" in all_content:
+        layers["frontend"].append("Vue.js App")
+    elif "angular" in all_content:
+        layers["frontend"].append("Angular App")
+
+    # Detect backend
+    backend_map = {
+        "express": "Express API",
+        "fastify": "Fastify API",
+        "nestjs": "NestJS API",
+        "fastapi": "FastAPI",
+        "flask": "Flask API",
+        "django": "Django API",
+        "streamlit": "Streamlit UI",
+    }
+    for fw, label in backend_map.items():
+        if fw == framework:
+            layers["backend"].append(label)
+            break
+    if not layers["backend"] and project_type in ("python", "node"):
+        layers["backend"].append(f"{project_type.title()} Service")
+
+    # Detect databases & externals
+    layers["database"] = _detect_database_tech(all_content)
+    layers["external"] = _detect_external_integrations(all_content)
+
+    # Build Mermaid diagram
+    nodes: list[str] = []
+    edges: list[str] = []
+
+    frontend_ids: list[str] = []
+    for i, fe in enumerate(layers["frontend"]):
+        nid = f"FE{i}"
+        nodes.append(f'    {nid}["{fe}"]')
+        frontend_ids.append(nid)
+
+    backend_ids: list[str] = []
+    for i, be in enumerate(layers["backend"]):
+        nid = f"BE{i}"
+        nodes.append(f'    {nid}["{be}"]')
+        backend_ids.append(nid)
+
+    db_ids: list[str] = []
+    for i, db in enumerate(layers["database"]):
+        nid = f"DB{i}"
+        nodes.append(f'    {nid}[("{db}")]')
+        db_ids.append(nid)
+
+    ext_ids: list[str] = []
+    for i, ext in enumerate(layers["external"]):
+        nid = f"EXT{i}"
+        nodes.append(f'    {nid}["{ext}"]')
+        ext_ids.append(nid)
+
+    for fid in frontend_ids:
+        for bid in backend_ids:
+            edges.append(f"    {fid} --> {bid}")
+
+    for bid in backend_ids:
+        for did in db_ids:
+            edges.append(f"    {bid} --> {did}")
+        for eid in ext_ids:
+            edges.append(f"    {bid} --> {eid}")
+
+    if not nodes:
+        nodes.append('    APP["Application"]')
+
+    diagram_lines = ["graph TD"] + nodes + edges
+    mermaid_diagram = "\n".join(diagram_lines)
+
+    return {
+        "layers": layers,
+        "mermaid_diagram": mermaid_diagram,
+    }
+
+
+@app.route("/visualize-architecture", methods=["POST"])
+def visualize_architecture() -> Any:
+    """New Agent 3: Architecture Visualization Agent — generate Mermaid diagrams."""
+    data = request.get_json(silent=True) or {}
+    repo_url = (data.get("repo_url") or "").strip()
+
+    if not repo_url:
+        return jsonify({"error": "repo_url is required"}), 400
+
+    ok, reason = validate_github_repo_url(repo_url)
+    if not ok:
+        return jsonify({"error": reason}), 400
+
+    try:
+        repo_path, repo_name, clone_logs = clone_or_update_repo(repo_url)
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+    project_type = detect_project_type(repo_path)
+    framework_details = detect_framework_details(repo_path)
+    framework = framework_details.get("framework", "unknown")
+    arch = generate_architecture_diagram(repo_path, project_type, framework)
+
+    return jsonify({
+        "status": "visualized",
+        "repo": repo_name,
+        "clone_logs": clone_logs,
+        "project_type": project_type,
+        "framework": framework,
+        "architecture": arch,
+        "message": "Architecture diagram generated. Embed mermaid_diagram in your README.",
+    })
+
+
+# ---------------------------------------------------------------------------
+# NEW AGENT 4 — PERFORMANCE ANALYSIS AGENT
+# ---------------------------------------------------------------------------
+
+def analyze_performance(repo_path: Path, project_type: str, framework: str) -> list[dict[str, str]]:
+    """Scan repository for common performance issues and return recommendations."""
+    issues: list[dict[str, str]] = []
+
+    exclude_dirs = {".git", "node_modules", "venv", "__pycache__", "dist", "build", ".next"}
+
+    for f in repo_path.rglob("*"):
+        if not f.is_file():
+            continue
+        rel = f.relative_to(repo_path)
+        if any(part in exclude_dirs for part in rel.parts):
+            continue
+        if f.suffix.lower() not in {".py", ".js", ".ts", ".jsx", ".tsx"}:
+            continue
+        try:
+            content = f.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        rel_str = str(rel)
+
+        # Python: blocking sleep in request handlers
+        if project_type == "python" and "time.sleep(" in content:
+            issues.append({
+                "file": rel_str,
+                "issue": "Blocking sleep detected",
+                "suggestion": "Replace time.sleep() with async equivalents (asyncio.sleep) or background tasks.",
+                "severity": "medium",
+            })
+
+        # Python: nested loops that could be expensive
+        if project_type == "python":
+            nested = re.findall(r"for .+ in .+:\s*\n\s+for .+ in .+:", content)
+            if nested:
+                issues.append({
+                    "file": rel_str,
+                    "issue": "Nested loops detected",
+                    "suggestion": "Review nested loops for O(n²) complexity; consider vectorised operations (numpy) or dict lookups.",
+                    "severity": "low",
+                })
+
+        # React: inline function creation in JSX (unnecessary re-renders)
+        if framework == "react" and f.suffix.lower() in {".jsx", ".tsx", ".js", ".ts"}:
+            inline_fns = re.findall(r"on\w+\s*=\s*\{?\s*\(", content)
+            if len(inline_fns) > 3:
+                issues.append({
+                    "file": rel_str,
+                    "issue": "Multiple inline arrow functions in JSX event handlers",
+                    "suggestion": "Extract handlers to useCallback to prevent unnecessary child re-renders.",
+                    "severity": "low",
+                })
+
+        # Node/React: synchronous fs calls
+        if project_type == "node" and re.search(r"\bfs\.(readFileSync|writeFileSync|existsSync)\b", content):
+            issues.append({
+                "file": rel_str,
+                "issue": "Synchronous file system call detected",
+                "suggestion": "Use async fs.promises API or streams to avoid blocking the event loop.",
+                "severity": "medium",
+            })
+
+    # React: check bundle size indicators
+    if framework == "react":
+        pkg_json = repo_path / "package.json"
+        if pkg_json.exists():
+            try:
+                pkg = json.loads(pkg_json.read_text(encoding="utf-8"))
+                deps = {**pkg.get("dependencies", {}), **pkg.get("devDependencies", {})}
+                heavy = [d for d in ("moment", "lodash", "rxjs", "antd", "material-ui", "@mui/material") if d in deps]
+                if heavy:
+                    issues.append({
+                        "file": "package.json",
+                        "issue": f"Heavy dependencies detected: {', '.join(heavy)}",
+                        "suggestion": (
+                            "Use tree-shakable alternatives (e.g. date-fns instead of moment, "
+                            "lodash-es for tree-shaking) and enable code splitting / lazy loading."
+                        ),
+                        "severity": "medium",
+                    })
+                if "react-router-dom" in deps:
+                    src_extensions = {".jsx", ".tsx", ".js", ".ts"}
+                    src_content = "".join(
+                        f.read_text(encoding="utf-8", errors="ignore")
+                        for f in repo_path.rglob("*")
+                        if f.is_file() and f.suffix.lower() in src_extensions
+                        and not any(part in exclude_dirs for part in f.relative_to(repo_path).parts)
+                    )
+                    if "React.lazy" not in src_content:
+                        issues.append({
+                            "file": "src/",
+                            "issue": "React Router detected but no lazy loading found",
+                            "suggestion": "Use React.lazy() and Suspense for route-level code splitting to reduce initial bundle size.",
+                            "severity": "low",
+                        })
+            except Exception:
+                pass
+
+    return issues
+
+
+@app.route("/analyze-performance", methods=["POST"])
+def analyze_performance_endpoint() -> Any:
+    """New Agent 4: Performance Analysis Agent — detect performance anti-patterns."""
+    data = request.get_json(silent=True) or {}
+    repo_url = (data.get("repo_url") or "").strip()
+
+    if not repo_url:
+        return jsonify({"error": "repo_url is required"}), 400
+
+    ok, reason = validate_github_repo_url(repo_url)
+    if not ok:
+        return jsonify({"error": reason}), 400
+
+    try:
+        repo_path, repo_name, clone_logs = clone_or_update_repo(repo_url)
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+    project_type = detect_project_type(repo_path)
+    framework_details = detect_framework_details(repo_path)
+    framework = framework_details.get("framework", "unknown")
+    perf_issues = analyze_performance(repo_path, project_type, framework)
+
+    severity_count = {"high": 0, "medium": 0, "low": 0}
+    for issue in perf_issues:
+        sev = issue.get("severity", "low")
+        severity_count[sev] = severity_count.get(sev, 0) + 1
+
+    return jsonify({
+        "status": "performance-analyzed",
+        "repo": repo_name,
+        "clone_logs": clone_logs,
+        "project_type": project_type,
+        "framework": framework,
+        "issues": perf_issues,
+        "issue_count": len(perf_issues),
+        "severity_breakdown": severity_count,
+        "message": f"Performance analysis complete. Found {len(perf_issues)} potential issue(s).",
+    })
+
+
+# ---------------------------------------------------------------------------
+# NEW AGENT 5 — SECURITY ANALYSIS AGENT
+# ---------------------------------------------------------------------------
+
+def analyze_security(repo_path: Path, project_type: str) -> list[dict[str, str]]:
+    """Deep security scan beyond the basic review checks."""
+    issues: list[dict[str, str]] = []
+    exclude_dirs = {".git", "node_modules", "venv", "__pycache__", "dist", "build", ".next"}
+
+    # CORS wildcard pattern
+    cors_wildcard = re.compile(r"cors\s*\(\s*['\"]?\*['\"]?\s*\)|allow_origins\s*=\s*\[?\s*['\*]['\*]?\s*\]?", re.IGNORECASE)
+    # Unsafe eval
+    eval_pattern = re.compile(r"\beval\s*\(", re.IGNORECASE)
+    # Weak JWT secret
+    weak_jwt = re.compile(r"(jwt\.sign|jwt_encode|SECRET_KEY\s*=)\s*.*['\"](.{0,16})['\"]", re.IGNORECASE)
+    # SQL injection risk (string format in query)
+    sql_inject = re.compile(r'(execute|cursor\.execute)\s*\(\s*["\'].*%[s|d]', re.IGNORECASE)
+    # Hardcoded passwords
+    hardcoded_pw = re.compile(r"(?i)(password|passwd|pwd)\s*=\s*['\"][^'\"]{4,}['\"]")
+    benign_markers = ("change_me", "your_", "example", "placeholder", "test", "dummy", "sample")
+
+    for f in repo_path.rglob("*"):
+        if not f.is_file():
+            continue
+        rel = f.relative_to(repo_path)
+        if any(part in exclude_dirs for part in rel.parts):
+            continue
+        if f.suffix.lower() not in {".py", ".js", ".ts", ".jsx", ".tsx", ".env", ".json", ".yaml", ".yml"}:
+            continue
+        try:
+            content = f.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        rel_str = str(rel)
+
+        if cors_wildcard.search(content):
+            issues.append({
+                "file": rel_str,
+                "issue": "CORS allows all origins (*)",
+                "recommendation": "Restrict CORS to specific trusted origins instead of using wildcard.",
+                "severity": "high",
+            })
+
+        for m in eval_pattern.finditer(content):
+            ctx = content[max(0, m.start() - 40):m.end() + 40].strip()
+            issues.append({
+                "file": rel_str,
+                "issue": "Unsafe eval() usage detected",
+                "recommendation": "Avoid eval(); use safer alternatives like JSON.parse() or ast.literal_eval().",
+                "severity": "high",
+                "context": ctx,
+            })
+
+        for m in weak_jwt.finditer(content):
+            secret = m.group(2)
+            if len(secret) < 16:
+                issues.append({
+                    "file": rel_str,
+                    "issue": "Weak or short JWT secret",
+                    "recommendation": "Use a cryptographically strong secret of at least 32 characters from an environment variable.",
+                    "severity": "high",
+                })
+
+        for m in sql_inject.finditer(content):
+            issues.append({
+                "file": rel_str,
+                "issue": "Potential SQL injection via string formatting",
+                "recommendation": "Use parameterised queries instead of string formatting in SQL statements.",
+                "severity": "high",
+            })
+
+        for m in hardcoded_pw.finditer(content):
+            candidate = m.group(0).lower()
+            if any(marker in candidate for marker in benign_markers):
+                continue
+            issues.append({
+                "file": rel_str,
+                "issue": "Hardcoded password detected",
+                "recommendation": "Move passwords to environment variables and load via os.getenv() / process.env.",
+                "severity": "high",
+            })
+
+    # Check for .env committed to repo (non-example)
+    env_file = repo_path / ".env"
+    if env_file.exists():
+        gitignore = repo_path / ".gitignore"
+        ignored = False
+        if gitignore.exists():
+            try:
+                content = gitignore.read_text(encoding="utf-8", errors="ignore")
+                gitignore_lines = content.splitlines()
+                ignored = ".env" in gitignore_lines or "*.env" in gitignore_lines
+            except OSError:
+                pass
+        if not ignored:
+            issues.append({
+                "file": ".env",
+                "issue": ".env file present but may not be in .gitignore",
+                "recommendation": "Ensure .env is listed in .gitignore to prevent committing secrets.",
+                "severity": "high",
+            })
+
+    # Node.js: check for npm audit advisories indicator
+    if project_type == "node":
+        pkg_lock = repo_path / "package-lock.json"
+        if pkg_lock.exists():
+            try:
+                audit = run_command("npm audit --json --audit-level=high", repo_path, timeout=120)
+                if audit.stdout:
+                    try:
+                        audit_data = json.loads(audit.stdout)
+                        vuln_count = audit_data.get("metadata", {}).get("vulnerabilities", {})
+                        high_vulns = vuln_count.get("high", 0) + vuln_count.get("critical", 0)
+                        if high_vulns > 0:
+                            issues.append({
+                                "file": "package-lock.json",
+                                "issue": f"npm audit reports {high_vulns} high/critical vulnerability(s)",
+                                "recommendation": "Run `npm audit fix` or update affected packages.",
+                                "severity": "high",
+                            })
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+    return issues
+
+
+@app.route("/analyze-security", methods=["POST"])
+def analyze_security_endpoint() -> Any:
+    """New Agent 5: Security Analysis Agent — deep security inspection."""
+    data = request.get_json(silent=True) or {}
+    repo_url = (data.get("repo_url") or "").strip()
+
+    if not repo_url:
+        return jsonify({"error": "repo_url is required"}), 400
+
+    ok, reason = validate_github_repo_url(repo_url)
+    if not ok:
+        return jsonify({"error": reason}), 400
+
+    try:
+        repo_path, repo_name, clone_logs = clone_or_update_repo(repo_url)
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+    project_type = detect_project_type(repo_path)
+    sec_issues = analyze_security(repo_path, project_type)
+    severity_count = {"high": 0, "medium": 0, "low": 0}
+    for issue in sec_issues:
+        sev = issue.get("severity", "low")
+        severity_count[sev] = severity_count.get(sev, 0) + 1
+
+    return jsonify({
+        "status": "security-analyzed",
+        "repo": repo_name,
+        "clone_logs": clone_logs,
+        "project_type": project_type,
+        "issues": sec_issues,
+        "issue_count": len(sec_issues),
+        "severity_breakdown": severity_count,
+        "message": f"Security analysis complete. Found {len(sec_issues)} potential issue(s).",
+    })
+
+
+# ---------------------------------------------------------------------------
+# NEW AGENT 6 — DEPENDENCY CLEANUP AGENT
+# ---------------------------------------------------------------------------
+
+def find_unused_dependencies(repo_path: Path, project_type: str) -> dict[str, Any]:
+    """Scan source code imports vs declared dependencies to find unused packages."""
+    unused: list[str] = []
+    declared: list[str] = []
+    used_imports: list[str] = []
+
+    exclude_dirs = {".git", "node_modules", "venv", "__pycache__", "dist", "build", ".next"}
+
+    if project_type == "python":
+        req_file = repo_path / "requirements.txt"
+        if not req_file.exists():
+            return {"declared": [], "used": [], "unused": [], "note": "requirements.txt not found"}
+
+        try:
+            req_lines = req_file.read_text(encoding="utf-8", errors="ignore").splitlines()
+        except OSError:
+            return {"declared": [], "used": [], "unused": [], "note": "Could not read requirements.txt"}
+
+        for line in req_lines:
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#") or stripped.startswith("-"):
+                continue
+            # Normalise package name (strip version specifiers)
+            pkg = re.split(r"[>=<!~\[]", stripped)[0].strip().lower().replace("-", "_")
+            if pkg:
+                declared.append(pkg)
+
+        # Collect all import statements from Python files
+        import_pattern = re.compile(r"^\s*(?:import|from)\s+([a-zA-Z0-9_]+)", re.MULTILINE)
+        for f in repo_path.rglob("*.py"):
+            rel = f.relative_to(repo_path)
+            if any(part in exclude_dirs for part in rel.parts):
+                continue
+            try:
+                content = f.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+            for m in import_pattern.finditer(content):
+                used_imports.append(m.group(1).lower().replace("-", "_"))
+
+        used_set = set(used_imports)
+        unused = [pkg for pkg in declared if pkg not in used_set]
+
+    elif project_type == "node":
+        pkg_json = repo_path / "package.json"
+        if not pkg_json.exists():
+            return {"declared": [], "used": [], "unused": [], "note": "package.json not found"}
+
+        try:
+            pkg_data = json.loads(pkg_json.read_text(encoding="utf-8"))
+        except Exception:
+            return {"declared": [], "used": [], "unused": [], "note": "Could not parse package.json"}
+
+        deps = list(pkg_data.get("dependencies", {}).keys())
+        declared = [d.lower() for d in deps]
+
+        # Collect require/import statements
+        require_pattern = re.compile(r"""(?:require|import)\s*\(*['"]([^'"./][^'"]*?)['"]""")
+        for f in repo_path.rglob("*"):
+            if not f.is_file():
+                continue
+            rel = f.relative_to(repo_path)
+            if any(part in exclude_dirs for part in rel.parts):
+                continue
+            if f.suffix.lower() not in {".js", ".ts", ".jsx", ".tsx", ".mjs", ".cjs"}:
+                continue
+            try:
+                content = f.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+            for m in require_pattern.finditer(content):
+                raw = m.group(1)
+                # Handle scoped packages (@scope/pkg)
+                if raw.startswith("@"):
+                    parts = raw.split("/")
+                    used_imports.append("/".join(parts[:2]).lower())
+                else:
+                    used_imports.append(raw.split("/")[0].lower())
+
+        used_set = set(used_imports)
+        unused = [pkg for pkg in declared if pkg not in used_set]
+
+    return {
+        "declared": declared,
+        "used": sorted(set(used_imports)),
+        "unused": unused,
+        "note": f"Found {len(unused)} potentially unused package(s) out of {len(declared)} declared.",
+    }
+
+
+@app.route("/cleanup-dependencies", methods=["POST"])
+def cleanup_dependencies() -> Any:
+    """New Agent 6: Dependency Cleanup Agent — detect unused packages."""
+    data = request.get_json(silent=True) or {}
+    repo_url = (data.get("repo_url") or "").strip()
+
+    if not repo_url:
+        return jsonify({"error": "repo_url is required"}), 400
+
+    ok, reason = validate_github_repo_url(repo_url)
+    if not ok:
+        return jsonify({"error": reason}), 400
+
+    try:
+        repo_path, repo_name, clone_logs = clone_or_update_repo(repo_url)
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+    project_type = detect_project_type(repo_path)
+    result = find_unused_dependencies(repo_path, project_type)
+
+    return jsonify({
+        "status": "dependencies-analyzed",
+        "repo": repo_name,
+        "clone_logs": clone_logs,
+        "project_type": project_type,
+        "dependency_analysis": result,
+        "message": result.get("note", ""),
+    })
+
+
+# ---------------------------------------------------------------------------
+# NEW AGENT 7 — TEST GENERATION AGENT
+# ---------------------------------------------------------------------------
+
+def generate_starter_tests(repo_path: Path, project_type: str, framework: str) -> list[dict[str, str]]:
+    """Generate starter test files for the project."""
+    generated: list[dict[str, str]] = []
+
+    if project_type == "python":
+        test_dir = repo_path / "tests"
+        test_file = test_dir / "test_app.py"
+        if test_file.exists():
+            return []
+        test_dir.mkdir(exist_ok=True)
+
+        if framework in ("flask", "fastapi"):
+            if framework == "flask":
+                content = (
+                    '"""Auto-generated Flask starter tests."""\n'
+                    "import pytest\n\n"
+                    "try:\n"
+                    "    from app import app as flask_app\n"
+                    "except ImportError:\n"
+                    "    flask_app = None\n\n\n"
+                    "@pytest.fixture()\n"
+                    "def client():\n"
+                    "    if flask_app is None:\n"
+                    "        pytest.skip('app module not importable')\n"
+                    "    flask_app.config['TESTING'] = True\n"
+                    "    with flask_app.test_client() as c:\n"
+                    "        yield c\n\n\n"
+                    "def test_health(client):\n"
+                    "    response = client.get('/health')\n"
+                    "    assert response.status_code in (200, 404)\n\n\n"
+                    "def test_index(client):\n"
+                    "    response = client.get('/')\n"
+                    "    assert response.status_code in (200, 301, 302)\n"
+                )
+            else:  # fastapi
+                content = (
+                    '"""Auto-generated FastAPI starter tests."""\n'
+                    "import pytest\n"
+                    "from fastapi.testclient import TestClient\n\n"
+                    "try:\n"
+                    "    from app import app\n"
+                    "except ImportError:\n"
+                    "    app = None\n\n\n"
+                    "@pytest.fixture()\n"
+                    "def client():\n"
+                    "    if app is None:\n"
+                    "        pytest.skip('app module not importable')\n"
+                    "    return TestClient(app)\n\n\n"
+                    "def test_health(client):\n"
+                    "    response = client.get('/health')\n"
+                    "    assert response.status_code in (200, 404)\n"
+                )
+        else:
+            entry = find_python_entrypoint(repo_path)
+            module = entry.replace(".py", "")
+            content = (
+                '"""Auto-generated pytest starter tests."""\n'
+                "import pytest\n\n\n"
+                f"def test_module_importable():\n"
+                f"    \"\"\"Verify that the main module can be imported without errors.\"\"\"\n"
+                f"    try:\n"
+                f"        import {module}  # noqa: F401\n"
+                f"    except ImportError as exc:\n"
+                f"        pytest.skip(f'Module not importable: {{exc}}')\n\n\n"
+                "def test_placeholder():\n"
+                "    \"\"\"Placeholder test — replace with real assertions.\"\"\"\n"
+                "    assert True\n"
+            )
+
+        test_file.write_text(content, encoding="utf-8")
+        generated.append({"file": str(test_file.relative_to(repo_path)), "framework": "pytest"})
+
+        # Add conftest.py
+        conftest = test_dir / "conftest.py"
+        if not conftest.exists():
+            conftest.write_text(
+                '"""pytest configuration file."""\n'
+                "import sys\n"
+                "from pathlib import Path\n\n"
+                "# Ensure repo root is on the path so test imports work.\n"
+                "sys.path.insert(0, str(Path(__file__).parent.parent))\n",
+                encoding="utf-8",
+            )
+            generated.append({"file": str(conftest.relative_to(repo_path)), "framework": "pytest"})
+
+    elif project_type == "node":
+        # Determine test framework from package.json
+        pkg_json = repo_path / "package.json"
+        test_fw = "jest"
+        if pkg_json.exists():
+            try:
+                pkg = json.loads(pkg_json.read_text(encoding="utf-8"))
+                dev_deps = pkg.get("devDependencies", {})
+                if "vitest" in dev_deps:
+                    test_fw = "vitest"
+                elif "mocha" in dev_deps:
+                    test_fw = "mocha"
+            except Exception:
+                pass
+
+        if framework == "react":
+            test_dir = repo_path / "src" / "__tests__"
+            test_file = test_dir / "App.test.jsx"
+            if not test_file.exists():
+                test_dir.mkdir(parents=True, exist_ok=True)
+                if test_fw == "vitest":
+                    content = (
+                        "import { describe, it, expect } from 'vitest';\n"
+                        "import { render } from '@testing-library/react';\n\n"
+                        "// Auto-generated React component test\n"
+                        "describe('App', () => {\n"
+                        "  it('renders without crashing', () => {\n"
+                        "    // Replace App with your actual root component\n"
+                        "    expect(true).toBe(true);\n"
+                        "  });\n"
+                        "});\n"
+                    )
+                else:
+                    content = (
+                        "import { render } from '@testing-library/react';\n\n"
+                        "// Auto-generated React component test\n"
+                        "describe('App', () => {\n"
+                        "  it('renders without crashing', () => {\n"
+                        "    // Replace App with your actual root component\n"
+                        "    expect(true).toBe(true);\n"
+                        "  });\n"
+                        "});\n"
+                    )
+                test_file.write_text(content, encoding="utf-8")
+                generated.append({"file": str(test_file.relative_to(repo_path)), "framework": test_fw})
+        else:
+            # Node.js API test
+            test_dir = repo_path / "tests"
+            test_file = test_dir / "app.test.js"
+            if not test_file.exists():
+                test_dir.mkdir(exist_ok=True)
+                if test_fw == "vitest":
+                    content = (
+                        "import { describe, it, expect } from 'vitest';\n\n"
+                        "// Auto-generated API starter tests\n"
+                        "describe('API', () => {\n"
+                        "  it('should be truthy placeholder', () => {\n"
+                        "    expect(true).toBe(true);\n"
+                        "  });\n"
+                        "});\n"
+                    )
+                else:
+                    content = (
+                        "// Auto-generated API starter tests (Jest/Mocha compatible)\n"
+                        "const request = require('supertest');\n\n"
+                        "describe('API', () => {\n"
+                        "  it('GET / should respond', async () => {\n"
+                        "    // Import your app/server here and replace the placeholder\n"
+                        "    expect(true).toBe(true);\n"
+                        "  });\n"
+                        "});\n"
+                    )
+                test_file.write_text(content, encoding="utf-8")
+                generated.append({"file": str(test_file.relative_to(repo_path)), "framework": test_fw})
+
+    return generated
+
+
+@app.route("/generate-tests", methods=["POST"])
+def generate_tests() -> Any:
+    """New Agent 7: Test Generation Agent — scaffold starter tests for the project."""
+    data = request.get_json(silent=True) or {}
+    repo_url = (data.get("repo_url") or "").strip()
+    force = bool(data.get("force", False))
+
+    if not repo_url:
+        return jsonify({"error": "repo_url is required"}), 400
+
+    ok, reason = validate_github_repo_url(repo_url)
+    if not ok:
+        return jsonify({"error": reason}), 400
+
+    try:
+        repo_path, repo_name, clone_logs = clone_or_update_repo(repo_url)
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+    project_type = detect_project_type(repo_path)
+    framework_details = detect_framework_details(repo_path)
+    framework = framework_details.get("framework", "unknown")
+
+    # Check if tests already exist
+    test_markers = (
+        list(repo_path.glob("tests/**/*.py"))
+        + list(repo_path.glob("**/test_*.py"))
+        + list(repo_path.glob("**/*_test.py"))
+        + list(repo_path.glob("**/__tests__/**"))
+    )
+    already_has_tests = bool(test_markers) and not force
+
+    generated = [] if already_has_tests else generate_starter_tests(repo_path, project_type, framework)
+
+    return jsonify({
+        "status": "tests-generated",
+        "repo": repo_name,
+        "clone_logs": clone_logs,
+        "project_type": project_type,
+        "framework": framework,
+        "already_had_tests": already_has_tests,
+        "generated_files": generated,
+        "message": (
+            "Tests already present. Pass force=true to regenerate."
+            if already_has_tests
+            else f"Generated {len(generated)} starter test file(s)."
+        ),
+    })
+
+
+# ---------------------------------------------------------------------------
+# NEW AGENT 8 — API DISCOVERY & DOCUMENTATION AGENT
+# ---------------------------------------------------------------------------
+
+def discover_api_endpoints(repo_path: Path, project_type: str, framework: str) -> list[dict[str, Any]]:
+    """Scan source files to detect API endpoint definitions."""
+    endpoints: list[dict[str, Any]] = []
+    exclude_dirs = {".git", "node_modules", "venv", "__pycache__", "dist", "build", ".next"}
+
+    if framework in ("flask", "fastapi", "django", "express", "fastify", "nestjs"):
+        # Flask/FastAPI route patterns
+        flask_route = re.compile(
+            r"""@(?:app|router|blueprint)\s*\.\s*(get|post|put|patch|delete|route)\s*\(\s*['"]([^'"]+)['"](?:[^)]*?methods\s*=\s*\[([^\]]*)\])?""",
+            re.IGNORECASE,
+        )
+        # Express route patterns
+        express_route = re.compile(
+            r"""(?:app|router)\s*\.\s*(get|post|put|patch|delete)\s*\(\s*['"]([^'"]+)['"]""",
+            re.IGNORECASE,
+        )
+
+        for f in repo_path.rglob("*"):
+            if not f.is_file():
+                continue
+            rel = f.relative_to(repo_path)
+            if any(part in exclude_dirs for part in rel.parts):
+                continue
+            if f.suffix.lower() not in {".py", ".js", ".ts", ".jsx", ".tsx"}:
+                continue
+            try:
+                content = f.read_text(encoding="utf-8", errors="ignore")
+            except OSError:
+                continue
+            rel_str = str(rel)
+
+            if project_type == "python":
+                for m in flask_route.finditer(content):
+                    method = m.group(1).upper()
+                    path = m.group(2)
+                    methods_raw = m.group(3) or ""
+                    # Expand methods list from @app.route(..., methods=[...])
+                    if methods_raw:
+                        ms = re.findall(r"['\"]([A-Z]+)['\"]", methods_raw.upper())
+                        for meth in ms:
+                            endpoints.append({"method": meth, "path": path, "file": rel_str})
+                    else:
+                        endpoints.append({"method": method if method != "ROUTE" else "GET", "path": path, "file": rel_str})
+
+            elif project_type == "node":
+                for m in express_route.finditer(content):
+                    method = m.group(1).upper()
+                    path = m.group(2)
+                    endpoints.append({"method": method, "path": path, "file": rel_str})
+
+    return endpoints
+
+
+def format_api_docs(endpoints: list[dict[str, Any]], repo_name: str) -> str:
+    """Format discovered endpoints as Markdown API documentation."""
+    if not endpoints:
+        return f"# {repo_name} API Documentation\n\nNo endpoints detected automatically.\n"
+
+    lines = [
+        f"# {repo_name} API Documentation\n",
+        "Auto-generated by Cloud Agent API Discovery.\n",
+        "## Endpoints\n",
+        "| Method | Path | File |",
+        "|--------|------|------|",
+    ]
+    for ep in endpoints:
+        lines.append(f"| `{ep['method']}` | `{ep['path']}` | {ep['file']} |")
+
+    lines += [
+        "",
+        "## Usage\n",
+        "Base URL: `http://localhost:5000`\n",
+        "All endpoints accept and return JSON unless otherwise noted.",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+@app.route("/discover-api", methods=["POST"])
+def discover_api() -> Any:
+    """New Agent 8: API Discovery & Documentation Agent."""
+    data = request.get_json(silent=True) or {}
+    repo_url = (data.get("repo_url") or "").strip()
+    write_docs = bool(data.get("write_docs", False))
+
+    if not repo_url:
+        return jsonify({"error": "repo_url is required"}), 400
+
+    ok, reason = validate_github_repo_url(repo_url)
+    if not ok:
+        return jsonify({"error": reason}), 400
+
+    try:
+        repo_path, repo_name, clone_logs = clone_or_update_repo(repo_url)
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+    project_type = detect_project_type(repo_path)
+    framework_details = detect_framework_details(repo_path)
+    framework = framework_details.get("framework", "unknown")
+    endpoints = discover_api_endpoints(repo_path, project_type, framework)
+    api_docs = format_api_docs(endpoints, repo_name)
+
+    written_to: str | None = None
+    if write_docs:
+        docs_path = repo_path / "API.md"
+        docs_path.write_text(api_docs, encoding="utf-8")
+        written_to = str(docs_path)
+
+    return jsonify({
+        "status": "api-discovered",
+        "repo": repo_name,
+        "clone_logs": clone_logs,
+        "project_type": project_type,
+        "framework": framework,
+        "endpoints": endpoints,
+        "endpoint_count": len(endpoints),
+        "api_docs": api_docs,
+        "written_to": written_to,
+        "message": f"Discovered {len(endpoints)} API endpoint(s).",
+    })
+
+
+# ---------------------------------------------------------------------------
+# NEW AGENT 9 — REPOSITORY HEALTH SCORING AGENT
+# ---------------------------------------------------------------------------
+
+def calculate_health_score(repo_path: Path, project_type: str, framework: str) -> dict[str, Any]:
+    """Calculate a comprehensive repository health score out of 100."""
+    scores: dict[str, int] = {}
+
+    # --- Documentation (25 pts) ---
+    doc_score = 0
+    if (repo_path / "README.md").exists():
+        readme = (repo_path / "README.md").read_text(encoding="utf-8", errors="ignore")
+        if len(readme) > 200:
+            doc_score += 15
+        else:
+            doc_score += 5
+    if (repo_path / ".env.example").exists():
+        doc_score += 5
+    if (repo_path / "LICENSE").exists() or (repo_path / "LICENSE.md").exists():
+        doc_score += 5
+    scores["documentation"] = min(doc_score, 25)
+
+    # --- Build Reliability (25 pts) ---
+    build_score = 0
+    if project_type == "python":
+        if (repo_path / "requirements.txt").exists() or (repo_path / "pyproject.toml").exists():
+            build_score += 10
+        if (repo_path / "Dockerfile").exists():
+            build_score += 10
+        syntax = run_command("python -m compileall -q .", repo_path, timeout=120)
+        if syntax.ok:
+            build_score += 5
+    elif project_type == "node":
+        if (repo_path / "package.json").exists():
+            build_score += 10
+        if (repo_path / "Dockerfile").exists():
+            build_score += 10
+        lock_files = ["package-lock.json", "yarn.lock", "pnpm-lock.yaml"]
+        if any((repo_path / lf).exists() for lf in lock_files):
+            build_score += 5
+    scores["build_reliability"] = min(build_score, 25)
+
+    # --- Security (20 pts) ---
+    sec_issues = analyze_security(repo_path, project_type)
+    high_sec = sum(1 for i in sec_issues if i.get("severity") == "high")
+    sec_score = max(0, 20 - high_sec * 5)
+    scores["security"] = min(sec_score, 20)
+
+    # --- Testing (15 pts) ---
+    test_score = 0
+    if project_type == "python":
+        test_files = (
+            list(repo_path.glob("tests/**/*.py"))
+            + list(repo_path.glob("**/test_*.py"))
+            + list(repo_path.glob("**/*_test.py"))
+        )
+        if test_files:
+            test_score = 15
+    elif project_type == "node":
+        test_markers = [
+            repo_path / "tests",
+            repo_path / "__tests__",
+            repo_path / "vitest.config.js",
+            repo_path / "vitest.config.ts",
+            repo_path / "jest.config.js",
+            repo_path / "jest.config.ts",
+        ]
+        if any(m.exists() for m in test_markers):
+            test_score = 15
+    scores["testing"] = test_score
+
+    # --- Dependency Health (15 pts) ---
+    dep_score = 15
+    if project_type == "python":
+        req = repo_path / "requirements.txt"
+        if req.exists():
+            lines = req.read_text(encoding="utf-8", errors="ignore").splitlines()
+            unpinned = [line for line in lines if line.strip() and not line.strip().startswith("#") and not any(op in line for op in ("==", ">=", "<=", "~="))]
+            dep_score -= min(len(unpinned) * 2, 10)
+    elif project_type == "node":
+        pkg_json = repo_path / "package.json"
+        if pkg_json.exists():
+            try:
+                pkg = json.loads(pkg_json.read_text(encoding="utf-8"))
+                all_deps = {**pkg.get("dependencies", {}), **pkg.get("devDependencies", {})}
+                wild = [k for k, v in all_deps.items() if isinstance(v, str) and v.strip().lower() in ("*", "latest")]
+                dep_score -= min(len(wild) * 2, 10)
+            except Exception:
+                pass
+    scores["dependency_health"] = max(0, dep_score)
+
+    total = sum(scores.values())
+    return {
+        "total_score": total,
+        "max_score": 100,
+        "category_scores": scores,
+        "grade": "A" if total >= 85 else "B" if total >= 70 else "C" if total >= 55 else "D" if total >= 40 else "F",
+    }
+
+
+@app.route("/health-score", methods=["POST"])
+def health_score() -> Any:
+    """New Agent 9: Repository Health Scoring Agent — score out of 100."""
+    data = request.get_json(silent=True) or {}
+    repo_url = (data.get("repo_url") or "").strip()
+
+    if not repo_url:
+        return jsonify({"error": "repo_url is required"}), 400
+
+    ok, reason = validate_github_repo_url(repo_url)
+    if not ok:
+        return jsonify({"error": reason}), 400
+
+    try:
+        repo_path, repo_name, clone_logs = clone_or_update_repo(repo_url)
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+    project_type = detect_project_type(repo_path)
+    framework_details = detect_framework_details(repo_path)
+    framework = framework_details.get("framework", "unknown")
+    score_result = calculate_health_score(repo_path, project_type, framework)
+
+    return jsonify({
+        "status": "health-scored",
+        "repo": repo_name,
+        "clone_logs": clone_logs,
+        "project_type": project_type,
+        "framework": framework,
+        "health_score": score_result,
+        "message": (
+            f"Repository Health Score: {score_result['total_score']}/100 "
+            f"(Grade: {score_result['grade']})"
+        ),
+    })
+
+
+# ---------------------------------------------------------------------------
+# NEW AGENT 10 — DEPLOYMENT RECOMMENDATION AGENT
+# ---------------------------------------------------------------------------
+
+def recommend_deployment(project_type: str, framework: str, is_fullstack: bool) -> dict[str, Any]:
+    """Recommend the best deployment strategy based on project characteristics."""
+    recommendations: list[dict[str, str]] = []
+    primary: str = ""
+    instructions: list[str] = []
+
+    if framework == "react":
+        primary = "Vercel"
+        recommendations.append({
+            "platform": "Vercel",
+            "reason": "Best-in-class for React/Next.js static and SSR deployments. Zero-config CI/CD.",
+            "url": "https://vercel.com",
+        })
+        recommendations.append({
+            "platform": "Netlify",
+            "reason": "Excellent CDN and build pipeline for React SPAs with form handling.",
+            "url": "https://netlify.com",
+        })
+        instructions = [
+            "1. Push your code to GitHub.",
+            "2. Connect the repository to Vercel at https://vercel.com/new.",
+            "3. Vercel auto-detects React/Next.js and sets build commands.",
+            "4. Set environment variables in the Vercel dashboard.",
+            "5. Each push to main triggers a new deployment.",
+        ]
+
+    elif framework in ("express", "fastify", "nestjs"):
+        primary = "Render"
+        recommendations.append({
+            "platform": "Render",
+            "reason": "Simple Node.js web service deployment with free tier and auto-deploys.",
+            "url": "https://render.com",
+        })
+        recommendations.append({
+            "platform": "Railway",
+            "reason": "Instant Node.js deployments with built-in database support.",
+            "url": "https://railway.app",
+        })
+        instructions = [
+            "1. Create a new Web Service on Render.",
+            "2. Connect your GitHub repository.",
+            "3. Set Build Command: `npm install`",
+            "4. Set Start Command: `npm start`",
+            "5. Configure environment variables in Render dashboard.",
+        ]
+
+    elif framework in ("flask", "fastapi", "django"):
+        primary = "Railway"
+        recommendations.append({
+            "platform": "Railway",
+            "reason": "Excellent Python support with automatic Dockerfile detection and managed databases.",
+            "url": "https://railway.app",
+        })
+        recommendations.append({
+            "platform": "Render",
+            "reason": "Supports Python web services with Gunicorn. Free tier available.",
+            "url": "https://render.com",
+        })
+        recommendations.append({
+            "platform": "Fly.io",
+            "reason": "Global edge deployment for Python apps. Good Docker support.",
+            "url": "https://fly.io",
+        })
+        start_cmd = (
+            "gunicorn app:app --bind 0.0.0.0:$PORT"
+            if framework == "flask"
+            else "uvicorn app:app --host 0.0.0.0 --port $PORT"
+            if framework == "fastapi"
+            else "python manage.py runserver 0.0.0.0:$PORT"
+        )
+        instructions = [
+            "1. Ensure requirements.txt and Dockerfile are present.",
+            f"2. Start command: `{start_cmd}`",
+            "3. Connect repository to Railway or Render.",
+            "4. Set environment variables (DATABASE_URL, SECRET_KEY, etc.).",
+            "5. Railway auto-detects Python projects and builds from Dockerfile.",
+        ]
+
+    elif framework == "streamlit":
+        primary = "Streamlit Community Cloud"
+        recommendations.append({
+            "platform": "Streamlit Community Cloud",
+            "reason": "Purpose-built for Streamlit apps. Free hosting with GitHub integration.",
+            "url": "https://share.streamlit.io",
+        })
+        instructions = [
+            "1. Push code to a public (or private) GitHub repository.",
+            "2. Go to https://share.streamlit.io and sign in with GitHub.",
+            "3. Select your repository and main app file.",
+            "4. Configure secrets in Streamlit Cloud settings.",
+            "5. Your app is live at a share.streamlit.io URL.",
+        ]
+
+    else:
+        primary = "Docker (self-hosted)"
+        recommendations.append({
+            "platform": "Docker + VPS",
+            "reason": "Full control via Dockerfile. Deploy to any VPS (DigitalOcean, Hetzner, etc.).",
+            "url": "https://www.docker.com",
+        })
+        instructions = [
+            "1. Build Docker image: `docker build -t your-app .`",
+            "2. Push to Docker Hub or a private registry.",
+            "3. Pull and run on your VPS: `docker run -d -p 80:5000 your-app`",
+            "4. Use nginx as a reverse proxy for production.",
+        ]
+
+    if is_fullstack:
+        recommendations.append({
+            "platform": "Docker Compose (full-stack)",
+            "reason": "Ideal for full-stack projects combining frontend and backend in a single compose file.",
+            "url": "https://docs.docker.com/compose/",
+        })
+
+    return {
+        "primary_recommendation": primary,
+        "recommendations": recommendations,
+        "deployment_instructions": instructions,
+    }
+
+
+@app.route("/recommend-deployment", methods=["POST"])
+def recommend_deployment_endpoint() -> Any:
+    """New Agent 10: Deployment Recommendation Agent — suggest the best deployment platform."""
+    data = request.get_json(silent=True) or {}
+    repo_url = (data.get("repo_url") or "").strip()
+
+    if not repo_url:
+        return jsonify({"error": "repo_url is required"}), 400
+
+    ok, reason = validate_github_repo_url(repo_url)
+    if not ok:
+        return jsonify({"error": reason}), 400
+
+    try:
+        repo_path, repo_name, clone_logs = clone_or_update_repo(repo_url)
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+    project_type = detect_project_type(repo_path)
+    framework_details = detect_framework_details(repo_path)
+    framework = framework_details.get("framework", "unknown")
+    is_fullstack = framework_details.get("is_fullstack", False)
+    deployment = recommend_deployment(project_type, framework, is_fullstack)
+
+    return jsonify({
+        "status": "deployment-recommended",
+        "repo": repo_name,
+        "clone_logs": clone_logs,
+        "project_type": project_type,
+        "framework": framework,
+        "is_fullstack": is_fullstack,
+        "deployment": deployment,
+        "message": f"Primary recommendation: {deployment['primary_recommendation']}",
+    })
+
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)

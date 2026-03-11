@@ -121,6 +121,98 @@ Supported platforms: `render`, `railway`, `flyio`
 GET /health
 ```
 
+### New Advanced Agent Endpoints
+
+#### Self-Fixing Repository Agent
+
+```http
+POST /fix-repo
+Content-Type: application/json
+
+{ "repo_url": "https://github.com/user/repo" }
+```
+
+#### Automated Pull Request Agent
+
+```http
+POST /prepare-pr
+Content-Type: application/json
+
+{ "repo_url": "https://github.com/user/repo" }
+```
+
+#### Architecture Visualization Agent
+
+```http
+POST /visualize-architecture
+Content-Type: application/json
+
+{ "repo_url": "https://github.com/user/repo" }
+```
+
+#### Performance Analysis Agent
+
+```http
+POST /analyze-performance
+Content-Type: application/json
+
+{ "repo_url": "https://github.com/user/repo" }
+```
+
+#### Security Analysis Agent
+
+```http
+POST /analyze-security
+Content-Type: application/json
+
+{ "repo_url": "https://github.com/user/repo" }
+```
+
+#### Dependency Cleanup Agent
+
+```http
+POST /cleanup-dependencies
+Content-Type: application/json
+
+{ "repo_url": "https://github.com/user/repo" }
+```
+
+#### Test Generation Agent
+
+```http
+POST /generate-tests
+Content-Type: application/json
+
+{ "repo_url": "https://github.com/user/repo", "force": false }
+```
+
+#### API Discovery & Documentation Agent
+
+```http
+POST /discover-api
+Content-Type: application/json
+
+{ "repo_url": "https://github.com/user/repo", "write_docs": false }
+```
+
+#### Repository Health Scoring Agent
+
+```http
+POST /health-score
+Content-Type: application/json
+
+{ "repo_url": "https://github.com/user/repo" }
+```
+
+#### Deployment Recommendation Agent
+
+```http
+POST /recommend-deployment
+Content-Type: application/json
+
+{ "repo_url": "https://github.com/user/repo" }
+```
+
 ## Agent Architecture
 
 | Agent | Endpoint / Function | Responsibility |
@@ -135,6 +227,21 @@ GET /health
 | 8 | `docker_build_and_run` | Docker build validation |
 | 9 | `/generate-readme` | README generation |
 | 10 | `/improvement-report` | Repository improvement report |
+
+### New Advanced Agents
+
+| Agent | Endpoint | Responsibility |
+|-------|----------|----------------|
+| Fix Repo | `/fix-repo` | Self-Fixing Repository Agent — auto-apply common fixes |
+| Prepare PR | `/prepare-pr` | Automated Pull Request Agent — generate PR metadata |
+| Visualize Architecture | `/visualize-architecture` | Architecture Visualization Agent — Mermaid diagrams |
+| Performance Analysis | `/analyze-performance` | Performance Analysis Agent — detect anti-patterns |
+| Security Analysis | `/analyze-security` | Security Analysis Agent — deep security inspection |
+| Cleanup Dependencies | `/cleanup-dependencies` | Dependency Cleanup Agent — find unused packages |
+| Generate Tests | `/generate-tests` | Test Generation Agent — scaffold starter tests |
+| Discover API | `/discover-api` | API Discovery & Documentation Agent |
+| Health Score | `/health-score` | Repository Health Scoring Agent — score out of 100 |
+| Recommend Deployment | `/recommend-deployment` | Deployment Recommendation Agent |
 
 ## Build Instructions
 
